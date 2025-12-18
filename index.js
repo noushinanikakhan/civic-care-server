@@ -33,70 +33,77 @@ async function run() {
       res.send("CivicCare Server is running");
     });
 
-   // ✅ GET all issues (server-side pagination + search + filter + boosted first)
-app.get("/issues", async (req, res) => {
-  try {
-    const page = Math.max(parseInt(req.query.page) || 1, 1);
-    const limit = Math.min(Math.max(parseInt(req.query.limit) || 9, 1), 50);
-    const skip = (page - 1) * limit;
+    // ✅ GET all issues (server-side pagination + search + filter + boosted first)
+    app.get("/issues", async (req, res) => {
+      try {
+        const page = Math.max(parseInt(req.query.page) || 1, 1);
+        const limit = Math.min(Math.max(parseInt(req.query.limit) || 9, 1), 50);
+        const skip = (page - 1) * limit;
 
-    const search = (req.query.search || "").trim();
-    const category = (req.query.category || "").trim();
-    const status = (req.query.status || "").trim();
-    const priority = (req.query.priority || "").trim();
+        const search = (req.query.search || "").trim();
+        const category = (req.query.category || "").trim();
+        const status = (req.query.status || "").trim();
+        const priority = (req.query.priority || "").trim();
 
-    const filter = {};
+        const filter = {};
 
-    // server-side exact filters
-    if (category && category !== "all") filter.category = category;
-    if (status && status !== "all") filter.status = status;
-    if (priority && priority !== "all") filter.priority = priority;
+        // exact filters
+        if (category && category !== "all") filter.category = category;
+        if (status && status !== "all") filter.status = status;
+        if (priority && priority !== "all") filter.priority = priority;
 
-    // server-side search (title/category/location)
-    if (search) {
-      const regex = new RegExp(search, "i");
-      filter.$or = [
-        { title: regex },
-        { category: regex },
-        { location: regex },
-      ];
-    }
+        // search (title/category/location)
+        if (search) {
+          const regex = new RegExp(search, "i");
+          filter.$or = [{ title: regex }, { category: regex }, { location: regex }];
+        }
 
-    const total = await issuesCollection.countDocuments(filter);
+        const total = await issuesCollection.countDocuments(filter);
 
-    const issues = await issuesCollection
-      .find(filter)
-      .sort({ isBoosted: -1, createdAt: -1 }) // ✅ boosted stays above normal
-      .skip(skip)
-      .limit(limit)
-      .toArray();
+        const issues = await issuesCollection
+          .find(filter)
+          .sort({ isBoosted: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
 
-    res.send({
-      issues,
-      total,
-      page,
-      limit,
-      totalPages: Math.ceil(total / limit),
+        res.send({
+          issues,
+          total,
+          page,
+          limit,
+          totalPages: Math.ceil(total / limit),
+        });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to fetch issues" });
+      }
     });
-  } catch (err) {
-    res.status(500).send({ message: "Failed to fetch issues" });
-  }
-});
 
-
-    // ✅ GET issue by id (details page)
+    // ✅ GET issue by id (details page) - FIXED for your IssueDetails.jsx
+    // Your client expects: issueData.issue and issue.timeline
     app.get("/issues/:id", async (req, res) => {
       try {
         const { id } = req.params;
+
         const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
         if (!issue) return res.status(404).send({ message: "Issue not found" });
-        res.send(issue);
+
+        // timeline is stored in separate collection as: { issueId, entries: [...] }
+        const timelineDoc = await timelineCollection.findOne({ issueId: id });
+
+        const issueWithTimeline = {
+          ...issue,
+          timeline: timelineDoc?.entries || [],
+        };
+
+        // IMPORTANT: wrap as { issue: ... } because your client uses issueData?.issue
+        res.send({ issue: issueWithTimeline });
       } catch (err) {
         res.status(500).send({ message: "Failed to fetch issue" });
       }
     });
 
-    // ✅ POST create issue (single route, no duplicates)
+    // ✅ POST create issue
     app.post("/issues", async (req, res) => {
       try {
         const issueData = {
@@ -110,7 +117,7 @@ app.get("/issues", async (req, res) => {
 
         const result = await issuesCollection.insertOne(issueData);
 
-        // create timeline
+        // create timeline entry
         if (result.insertedId) {
           const timelineEntry = {
             issueId: result.insertedId.toString(),
@@ -138,7 +145,29 @@ app.get("/issues", async (req, res) => {
       }
     });
 
-    // ✅ PATCH upvote (rules enforced)
+    // ✅ DELETE issue (IssueDetails.jsx calls this)
+    app.delete("/issues/:id", async (req, res) => {
+      try {
+        const { id } = req.params;
+
+        const deleteResult = await issuesCollection.deleteOne({
+          _id: new ObjectId(id),
+        });
+
+        if (deleteResult.deletedCount === 0) {
+          return res.status(404).send({ message: "Issue not found" });
+        }
+
+        // optional: also delete timeline record
+        await timelineCollection.deleteOne({ issueId: id });
+
+        res.send({ success: true, message: "Issue deleted successfully" });
+      } catch (err) {
+        res.status(500).send({ message: "Failed to delete issue" });
+      }
+    });
+
+    // ✅ PATCH upvote (rules enforced) - FIXED response shape for IssueDetails.jsx
     app.patch("/issues/:id/upvote", async (req, res) => {
       try {
         const { id } = req.params;
@@ -151,15 +180,13 @@ app.get("/issues", async (req, res) => {
         const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
         if (!issue) return res.status(404).send({ message: "Issue not found" });
 
-        // Rule: cannot upvote own issue
+        // cannot upvote own issue
         const ownerEmail = issue.userEmail || issue.reportedBy;
         if (ownerEmail && ownerEmail === userEmail) {
-          return res
-            .status(403)
-            .send({ message: "You cannot upvote your own issue" });
+          return res.status(403).send({ message: "You cannot upvote your own issue" });
         }
 
-        // Rule: one upvote per user
+        // only once
         if (issue.upvotedBy?.includes(userEmail)) {
           return res.status(409).send({ message: "Already upvoted" });
         }
@@ -180,7 +207,11 @@ app.get("/issues", async (req, res) => {
           _id: new ObjectId(id),
         });
 
-        res.send(updatedIssue);
+        // return message + issue (IssueDetails uses data.message)
+        res.send({
+          message: "Upvoted successfully",
+          issue: updatedIssue,
+        });
       } catch (err) {
         res.status(500).send({ message: "Failed to upvote" });
       }
@@ -188,7 +219,7 @@ app.get("/issues", async (req, res) => {
 
     console.log("✅ Connected to MongoDB!");
   } finally {
-    // keep server running
+    // keep running
   }
 }
 
