@@ -26,9 +26,102 @@ async function run() {
 
     const db = client.db("civic_care_db");
     const issuesCollection = db.collection("issues");
+    const usersCollection = db.collection("users");
+
     const timelineCollection = db.collection("timeline");
 
-    // health
+    // user related apis
+
+    app.get("/users", async (req, res) => {
+  try {
+    const users = await usersCollection.find().sort({ createdAt: -1 }).toArray();
+    res.send(users);
+  } catch (err) {
+    res.status(500).send({ message: "Failed to load users" });
+  }
+});
+
+    app.post("/users", async (req, res) => {
+  try {
+    const { email, name, photoURL } = req.body;
+
+    if (!email) {
+      return res.status(400).send({ message: "Email is required" });
+    }
+
+    const existingUser = await usersCollection.findOne({ email });
+
+    // If user already exists, do nothing
+    if (existingUser) {
+      return res.send({ success: true, message: "User already exists" });
+    }
+
+    const newUser = {
+      email,
+      name: name || "",
+      photoURL: photoURL || "",
+      role: "citizen",      // ✅ default role
+      isBlocked: false,
+      isPremium: false,
+      createdAt: new Date(),
+    };
+
+    await usersCollection.insertOne(newUser);
+
+    res.send({ success: true, message: "User created successfully" });
+  } catch (error) {
+    res.status(500).send({ message: "Failed to create user" });
+  }
+});
+
+app.get("/users/role/:email", async (req, res) => {
+  try {
+    const email = req.params.email;
+
+    const user = await usersCollection.findOne(
+      { email },
+      { projection: { role: 1, email: 1, isBlocked: 1, isPremium: 1 } }
+    );
+
+    if (!user) {
+      return res.status(404).send({ message: "User not found" });
+    }
+
+    res.send(user);
+  } catch (error) {
+    res.status(500).send({ message: "Failed to get user role" });
+  }
+});
+
+app.patch("/users/role", async (req, res) => {
+  try {
+    const { email, role } = req.body;
+
+    if (!email || !role) {
+      return res.status(400).send({ message: "Email and role are required" });
+    }
+
+    const allowedRoles = ["citizen", "staff", "admin"];
+    if (!allowedRoles.includes(role)) {
+      return res.status(400).send({ message: "Invalid role" });
+    }
+
+    const result = await usersCollection.updateOne(
+      { email },
+      { $set: { role, updatedAt: new Date() } }
+    );
+
+    res.send({
+      success: true,
+      modifiedCount: result.modifiedCount,
+    });
+  } catch (error) {
+    res.status(500).send({ message: "Failed to update role" });
+  }
+});
+
+
+   
     app.get("/", (req, res) => {
       res.send("CivicCare Server is running");
     });
