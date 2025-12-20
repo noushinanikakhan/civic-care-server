@@ -1086,6 +1086,162 @@ app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
       }
     });
 
+
+    // create staff 
+    app.post("/admin/staff", verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const { name, email, phone, photoURL, password } = req.body || {};
+
+    if (!name || !email || !password) {
+      return res.status(400).send({
+        success: false,
+        message: "name, email, and password are required",
+      });
+    }
+
+    // ✅ 1) Create in Firebase Auth
+    let fbUser;
+    try {
+      fbUser = await admin.auth().createUser({
+        email,
+        password,
+        displayName: name,
+        photoURL: photoURL || "",
+      });
+    } catch (err) {
+      // If already exists in Firebase, return error to admin
+      return res.status(400).send({
+        success: false,
+        message: err.message || "Failed to create Firebase user",
+      });
+    }
+
+    // ✅ 2) Create/Upsert in MongoDB users collection (NEVER store password here)
+    const staffDoc = {
+      email,
+      name,
+      phone: phone,
+      photoURL: photoURL || "",
+      role: "staff",
+      isBlocked: false,
+      isPremium: false,
+      issueCount: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      firebaseUid: fbUser.uid, // helpful for delete later
+    };
+
+    const existing = await usersCollection.findOne({ email });
+    if (existing) {
+      // If user existed as citizen, promote to staff
+      await usersCollection.updateOne(
+        { email },
+        { $set: { ...staffDoc, createdAt: existing.createdAt } }
+      );
+      return res.send({
+        success: true,
+        message: "Staff updated (existing user promoted)",
+      });
+    }
+
+    await usersCollection.insertOne(staffDoc);
+
+    res.status(201).send({
+      success: true,
+      message: "Staff created successfully",
+    });
+  } catch (error) {
+    console.error("Error creating staff:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to create staff",
+      error: error.message,
+    });
+  }
+});
+
+
+// update staff info mondb only 
+app.patch("/admin/staff/:email", verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const targetEmail = req.params.email;
+    const { name, phone, photoURL, isBlocked } = req.body || {};
+
+    const staff = await usersCollection.findOne({ email: targetEmail });
+    if (!staff) return res.status(404).send({ success: false, message: "Staff not found" });
+
+    if ((staff.role || "").toLowerCase() !== "staff") {
+      return res.status(400).send({ success: false, message: "Target user is not staff" });
+    }
+
+    const $set = { updatedAt: new Date() };
+    if (name !== undefined) $set.name = name;
+    if (phone !== undefined) $set.phone = phone;
+    if (photoURL !== undefined) $set.photoURL = photoURL;
+    if (isBlocked !== undefined) $set.isBlocked = isBlocked;
+
+    await usersCollection.updateOne({ email: targetEmail }, { $set });
+
+    // Optional: also update Firebase displayName/photo
+    try {
+      const fb = await admin.auth().getUserByEmail(targetEmail);
+      await admin.auth().updateUser(fb.uid, {
+        displayName: name ?? fb.displayName,
+        photoURL: photoURL ?? fb.photoURL,
+      });
+    } catch (e) {
+      // ignore firebase sync errors for assignment stability
+    }
+
+    res.send({ success: true, message: "Staff updated" });
+  } catch (error) {
+    console.error("Error updating staff:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to update staff",
+      error: error.message,
+    });
+  }
+});
+
+
+//delete staff mongo+firebase 
+
+app.delete("/admin/staff/:email", verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const targetEmail = req.params.email;
+
+    const staff = await usersCollection.findOne({ email: targetEmail });
+    if (!staff) return res.status(404).send({ success: false, message: "Staff not found" });
+
+    if ((staff.role || "").toLowerCase() !== "staff") {
+      return res.status(400).send({ success: false, message: "Target user is not staff" });
+    }
+
+    // ✅ remove from DB
+    await usersCollection.deleteOne({ email: targetEmail });
+
+    // ✅ remove from Firebase
+    try {
+      const fb = await admin.auth().getUserByEmail(targetEmail);
+      await admin.auth().deleteUser(fb.uid);
+    } catch (e) {
+      // if already removed from firebase, ignore
+    }
+
+    res.send({ success: true, message: "Staff deleted" });
+  } catch (error) {
+    console.error("Error deleting staff:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to delete staff",
+      error: error.message,
+    });
+  }
+});
+
+
+
     console.log("✅ All routes loaded successfully");
   } catch (error) {
     console.error("❌ MongoDB connection error:", error);
