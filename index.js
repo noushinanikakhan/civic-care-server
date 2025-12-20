@@ -615,7 +615,15 @@ async function run() {
         const staff = await usersCollection
           .find(
             { role: "staff" },
-            { projection: { email: 1, name: 1, photoURL: 1, role: 1 } }
+            { projection: { email: 1, 
+              name: 1, 
+              photoURL: 1, 
+              role: 1, 
+              phone: 1,               // ✅ ADD THIS
+            staffPassword: 1,       // ✅ ADD THIS
+            isBlocked: 1,           // ✅ Optional but useful
+            createdAt: 1            // ✅ Optional
+            } }
           )
           .sort({ createdAt: -1 })
           .toArray();
@@ -1088,7 +1096,7 @@ app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
 
 
     // create staff 
-    app.post("/admin/staff", verifyToken, requireAdmin, async (req, res) => {
+app.post("/admin/staff", verifyToken, requireAdmin, async (req, res) => {
   try {
     const { name, email, phone, photoURL, password } = req.body || {};
 
@@ -1099,7 +1107,7 @@ app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
       });
     }
 
-    // ✅ 1) Create in Firebase Auth
+    // 1) Create in Firebase Auth
     let fbUser;
     try {
       fbUser = await admin.auth().createUser({
@@ -1109,47 +1117,45 @@ app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
         photoURL: photoURL || "",
       });
     } catch (err) {
-      // If already exists in Firebase, return error to admin
       return res.status(400).send({
         success: false,
-        message: err.message || "Failed to create Firebase user",
+        message: err?.message || "Failed to create Firebase user",
       });
     }
 
-    // ✅ 2) Create/Upsert in MongoDB users collection (NEVER store password here)
+    // 2) Save in MongoDB (⚠️ password stored for assignment visibility)
     const staffDoc = {
       email,
       name,
-      phone: phone,
+      phone: phone || "",
       photoURL: photoURL || "",
       role: "staff",
       isBlocked: false,
       isPremium: false,
       issueCount: 0,
+
+      // ⚠️ assignment-only
+      staffPassword: password,
+
+      firebaseUid: fbUser.uid,
       createdAt: new Date(),
       updatedAt: new Date(),
-      firebaseUid: fbUser.uid, // helpful for delete later
     };
 
+    // if exists, promote/overwrite
     const existing = await usersCollection.findOne({ email });
     if (existing) {
-      // If user existed as citizen, promote to staff
       await usersCollection.updateOne(
         { email },
         { $set: { ...staffDoc, createdAt: existing.createdAt } }
       );
-      return res.send({
-        success: true,
-        message: "Staff updated (existing user promoted)",
-      });
+
+      return res.send({ success: true, message: "Staff updated (promoted existing user)" });
     }
 
     await usersCollection.insertOne(staffDoc);
 
-    res.status(201).send({
-      success: true,
-      message: "Staff created successfully",
-    });
+    res.status(201).send({ success: true, message: "Staff created successfully" });
   } catch (error) {
     console.error("Error creating staff:", error);
     res.status(500).send({
@@ -1161,11 +1167,12 @@ app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
 });
 
 
-// update staff info mondb only 
+
+// update staff info mongodb and fire only 
 app.patch("/admin/staff/:email", verifyToken, requireAdmin, async (req, res) => {
   try {
     const targetEmail = req.params.email;
-    const { name, phone, photoURL, isBlocked } = req.body || {};
+    const { name, phone, photoURL, password, isBlocked } = req.body || {};
 
     const staff = await usersCollection.findOne({ email: targetEmail });
     if (!staff) return res.status(404).send({ success: false, message: "Staff not found" });
@@ -1180,17 +1187,25 @@ app.patch("/admin/staff/:email", verifyToken, requireAdmin, async (req, res) => 
     if (photoURL !== undefined) $set.photoURL = photoURL;
     if (isBlocked !== undefined) $set.isBlocked = isBlocked;
 
+    // ⚠️ assignment-only
+    if (password !== undefined && password !== "") $set.staffPassword = password;
+
     await usersCollection.updateOne({ email: targetEmail }, { $set });
 
-    // Optional: also update Firebase displayName/photo
+    // Sync to Firebase (name/photo/password if provided)
     try {
       const fb = await admin.auth().getUserByEmail(targetEmail);
-      await admin.auth().updateUser(fb.uid, {
-        displayName: name ?? fb.displayName,
-        photoURL: photoURL ?? fb.photoURL,
-      });
+
+      const fbUpdate = {};
+      if (name !== undefined) fbUpdate.displayName = name;
+      if (photoURL !== undefined) fbUpdate.photoURL = photoURL;
+      if (password !== undefined && password !== "") fbUpdate.password = password;
+
+      if (Object.keys(fbUpdate).length) {
+        await admin.auth().updateUser(fb.uid, fbUpdate);
+      }
     } catch (e) {
-      // ignore firebase sync errors for assignment stability
+      // ignore sync errors for assignment stability
     }
 
     res.send({ success: true, message: "Staff updated" });
@@ -1203,6 +1218,7 @@ app.patch("/admin/staff/:email", verifyToken, requireAdmin, async (req, res) => 
     });
   }
 });
+
 
 
 //delete staff mongo+firebase 
@@ -1218,16 +1234,12 @@ app.delete("/admin/staff/:email", verifyToken, requireAdmin, async (req, res) =>
       return res.status(400).send({ success: false, message: "Target user is not staff" });
     }
 
-    // ✅ remove from DB
     await usersCollection.deleteOne({ email: targetEmail });
 
-    // ✅ remove from Firebase
     try {
       const fb = await admin.auth().getUserByEmail(targetEmail);
       await admin.auth().deleteUser(fb.uid);
-    } catch (e) {
-      // if already removed from firebase, ignore
-    }
+    } catch (e) {}
 
     res.send({ success: true, message: "Staff deleted" });
   } catch (error) {
@@ -1239,6 +1251,7 @@ app.delete("/admin/staff/:email", verifyToken, requireAdmin, async (req, res) =>
     });
   }
 });
+
 
 
 
