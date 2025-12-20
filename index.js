@@ -4,7 +4,9 @@ require("dotenv").config();
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
-// ✅ Firebase Admin (server only)
+/* =========================
+   ✅ Firebase Admin (server only)
+   ========================= */
 const admin = require("firebase-admin");
 const serviceAccount = require("./serviceAccountKey-civiccare.json");
 
@@ -30,17 +32,23 @@ const verifyToken = async (req, res, next) => {
     const authHeader = req.headers.authorization;
 
     if (!authHeader || !authHeader.startsWith("Bearer ")) {
-      return res.status(401).send({ message: "Unauthorized (no token)" });
+      return res
+        .status(401)
+        .send({ success: false, message: "Unauthorized (no token)" });
     }
 
     const token = authHeader.split(" ")[1];
     const decoded = await admin.auth().verifyIdToken(token);
 
+    // ✅ keep your current approach
     req.decoded = decoded;
+
     next();
   } catch (err) {
     console.error("Token verification error:", err.message);
-    return res.status(401).send({ message: "Unauthorized (invalid token)" });
+    return res
+      .status(401)
+      .send({ success: false, message: "Unauthorized (invalid token)" });
   }
 };
 
@@ -66,103 +74,129 @@ async function run() {
     const usersCollection = db.collection("users");
     const issuesCollection = db.collection("issues");
 
-    // ✅ Create indexes if they don't exist
+    // ✅ indexes (safe + helpful)
     await usersCollection.createIndex({ email: 1 }, { unique: true });
+
+    // these help sorting/filtering
     await issuesCollection.createIndex({ createdAt: -1 });
     await issuesCollection.createIndex({ category: 1 });
     await issuesCollection.createIndex({ status: 1 });
+    await issuesCollection.createIndex({ priority: 1, createdAt: -1 });
+
+    // helps "my issues" fast
+    await issuesCollection.createIndex({ reportedBy: 1, createdAt: -1 });
+    await issuesCollection.createIndex({ "reportedBy.email": 1, createdAt: -1 });
+    await issuesCollection.createIndex({ userEmail: 1, createdAt: -1 });
 
     console.log("✅ Database indexes created");
 
     /* =========================
-       ✅ ROOT ENDPOINT
+       ✅ ROLE HELPERS
        ========================= */
-    app.get("/", (req, res) => {
-      res.send("🚀 CivicCare Server is running");
-    });
+    const requireAdmin = async (req, res, next) => {
+      const tokenEmail = req.decoded?.email;
+      console.log("🔍 Admin check for:", tokenEmail);
+
+      const user = await usersCollection.findOne({ email: tokenEmail });
+      console.log(
+        "🔍 User found:",
+        user ? { email: user.email, role: user.role } : "Not found"
+      );
+
+      if (!user || user.role !== "admin") {
+        console.log("❌ Admin access denied. Role:", user?.role);
+        return res
+          .status(403)
+          .send({ success: false, message: "Admin access required" });
+      }
+
+      req.requester = user;
+      next();
+    };
+
+    const requireStaff = async (req, res, next) => {
+      const tokenEmail = req.decoded?.email;
+      const user = await usersCollection.findOne({ email: tokenEmail });
+      if (!user || user.role !== "staff") {
+        return res
+          .status(403)
+          .send({ success: false, message: "Staff access required" });
+      }
+      req.requester = user;
+      next();
+    };
 
     /* =========================
-       ✅ HEALTH CHECK
+       ✅ ROOT + HEALTH
        ========================= */
+    app.get("/", (req, res) => res.send("🚀 CivicCare Server is running"));
+
     app.get("/health", async (req, res) => {
       try {
-        // Check MongoDB connection
         await client.db("admin").command({ ping: 1 });
-        
-        // Check collections exist
         const usersCount = await usersCollection.countDocuments();
         const issuesCount = await issuesCollection.countDocuments();
-        
         res.send({
           status: "healthy",
           database: "connected",
-          collections: {
-            users: usersCount,
-            issues: issuesCount
-          },
-          timestamp: new Date().toISOString()
+          collections: { users: usersCount, issues: issuesCount },
+          timestamp: new Date().toISOString(),
         });
       } catch (error) {
-        res.status(500).send({
-          status: "unhealthy",
-          error: error.message
-        });
+        res.status(500).send({ status: "unhealthy", error: error.message });
       }
     });
 
     /* =========================
-       ✅ USERS ENDPOINTS
+       ✅ USERS
        ========================= */
 
-    // ✅ CREATE USER (after Firebase auth)
+    // ✅ CREATE USER
     app.post("/users", async (req, res) => {
       try {
         const { email, name, photoURL } = req.body;
 
         if (!email) {
-          return res.status(400).send({ 
-            success: false, 
-            message: "Email is required" 
-          });
+          return res
+            .status(400)
+            .send({ success: false, message: "Email is required" });
         }
 
-        // Check if user already exists
         const existingUser = await usersCollection.findOne({ email });
         if (existingUser) {
-          return res.send({ 
-            success: true, 
+          return res.send({
+            success: true,
             message: "User already exists",
-            user: existingUser
+            user: existingUser,
           });
         }
 
-        // Create new user document
         const userDoc = {
           email,
-          name: name || email.split('@')[0],
+          name: name || email.split("@")[0],
           photoURL: photoURL || "",
-          role: "citizen", // Default role
+          role: "citizen",
           isPremium: false,
           isBlocked: false,
           issueCount: 0,
           createdAt: new Date(),
-          updatedAt: new Date()
+          updatedAt: new Date(),
         };
 
         const result = await usersCollection.insertOne(userDoc);
-        
-        res.status(201).send({ 
-          success: true, 
+
+        res.status(201).send({
+          success: true,
           message: "User created successfully",
           userId: result.insertedId,
-          user: userDoc
+          user: userDoc,
         });
       } catch (error) {
         console.error("Error creating user:", error);
-        res.status(500).send({ 
-          success: false, 
+        res.status(500).send({
+          success: false,
           message: "Failed to create user",
-          error: error.message 
+          error: error.message,
         });
       }
     });
@@ -173,21 +207,17 @@ async function run() {
         const requestedEmail = req.params.email;
         const tokenEmail = req.decoded.email;
 
-        // Allow user to view own profile OR admin to view any profile
         const requester = await usersCollection.findOne({ email: tokenEmail });
-        
         if (!requester) {
-          return res.status(404).send({ 
-            success: false, 
-            message: "Requester not found" 
-          });
+          return res
+            .status(404)
+            .send({ success: false, message: "Requester not found" });
         }
 
-        // Check permission
         if (requester.email !== requestedEmail && requester.role !== "admin") {
-          return res.status(403).send({ 
-            success: false, 
-            message: "Forbidden: Cannot access other user's profile" 
+          return res.status(403).send({
+            success: false,
+            message: "Forbidden: Cannot access other user's profile",
           });
         }
 
@@ -199,268 +229,190 @@ async function run() {
               email: 1,
               name: 1,
               photoURL: 1,
+              phone: 1,
               role: 1,
               isPremium: 1,
               isBlocked: 1,
               issueCount: 1,
-              createdAt: 1
-            }
+              createdAt: 1,
+              updatedAt: 1,
+            },
           }
         );
 
         if (!user) {
-          return res.status(404).send({ 
-            success: false, 
-            message: "User not found" 
-          });
+          return res
+            .status(404)
+            .send({ success: false, message: "User not found" });
         }
 
-        res.send({ 
-          success: true, 
-          user 
-        });
+        res.send({ success: true, user });
       } catch (error) {
         console.error("Error fetching profile:", error);
-        res.status(500).send({ 
-          success: false, 
+        res.status(500).send({
+          success: false,
           message: "Failed to load profile",
-          error: error.message 
+          error: error.message,
         });
       }
     });
 
-    // ✅ GET ALL USERS (admin only - for admin dashboard)
-    app.get("/users", verifyToken, async (req, res) => {
+    // ✅ UPDATE MY PROFILE (for admin/staff/citizen)
+    app.patch("/users/profile", verifyToken, async (req, res) => {
       try {
-        const tokenEmail = req.decoded.email;
-        const requester = await usersCollection.findOne({ email: tokenEmail });
+        const email = req.decoded.email;
+        const { name, photoURL, phone } = req.body || {};
 
-        if (!requester || requester.role !== "admin") {
-          return res.status(403).send({ 
-            success: false, 
-            message: "Admin access required" 
-          });
+        const $set = {};
+        if (name !== undefined) $set.name = name;
+        if (photoURL !== undefined) $set.photoURL = photoURL;
+        if (phone !== undefined) $set.phone = phone;
+        $set.updatedAt = new Date();
+
+        if (Object.keys($set).length === 0) {
+          return res
+            .status(400)
+            .send({ success: false, message: "No valid fields to update" });
         }
 
+        const result = await usersCollection.findOneAndUpdate(
+          { email },
+          { $set },
+          { returnDocument: "after" }
+        );
+
+        if (!result.value) {
+          return res
+            .status(404)
+            .send({ success: false, message: "User not found" });
+        }
+
+        res.send({
+          success: true,
+          message: "Profile updated",
+          user: result.value,
+        });
+      } catch (error) {
+        console.error("Error updating profile:", error);
+        res.status(500).send({
+          success: false,
+          message: "Failed to update profile",
+          error: error.message,
+        });
+      }
+    });
+
+    // ✅ GET ALL USERS (admin only)
+    app.get("/users", verifyToken, requireAdmin, async (req, res) => {
+      try {
         const users = await usersCollection
-          .find({}, {
-            projection: {
-              password: 0 // Exclude sensitive fields
-            }
-          })
+          .find({})
           .sort({ createdAt: -1 })
           .toArray();
-
-        res.send({ 
-          success: true, 
-          users,
-          count: users.length
-        });
+        res.send({ success: true, users, count: users.length });
       } catch (error) {
         console.error("Error fetching users:", error);
-        res.status(500).send({ 
-          success: false, 
+        res.status(500).send({
+          success: false,
           message: "Failed to load users",
-          error: error.message 
+          error: error.message,
         });
       }
     });
 
-    // ✅ UPDATE USER ROLE (admin only)
-    app.patch("/users/:email/role", verifyToken, async (req, res) => {
-      try {
-        const tokenEmail = req.decoded.email;
-        const targetEmail = req.params.email;
-        const { role } = req.body;
+    // ✅ TOGGLE USER BLOCK (admin only)
+    app.patch(
+      "/users/:email/toggle-block",
+      verifyToken,
+      requireAdmin,
+      async (req, res) => {
+        try {
+          const targetEmail = req.params.email;
 
-        // Check if requester is admin
-        const requester = await usersCollection.findOne({ email: tokenEmail });
-        if (!requester || requester.role !== "admin") {
-          return res.status(403).send({ 
-            success: false, 
-            message: "Admin access required" 
-          });
-        }
+          const targetUser = await usersCollection.findOne({ email: targetEmail });
+          if (!targetUser)
+            return res.status(404).send({ success: false, message: "User not found" });
 
-        // Validate role
-        const allowedRoles = ["citizen", "staff", "admin"];
-        if (!role || !allowedRoles.includes(role)) {
-          return res.status(400).send({ 
-            success: false, 
-            message: "Invalid role. Allowed: citizen, staff, admin" 
-          });
-        }
-
-        // Prevent self-demotion (admin changing their own role)
-        if (targetEmail === tokenEmail && role !== "admin") {
-          return res.status(400).send({ 
-            success: false, 
-            message: "Cannot change your own admin role" 
-          });
-        }
-
-        const result = await usersCollection.updateOne(
-          { email: targetEmail },
-          { 
-            $set: { 
-              role, 
-              updatedAt: new Date() 
-            } 
+          if ((targetUser.role || "").toLowerCase() === "admin") {
+            return res
+              .status(400)
+              .send({ success: false, message: "Cannot block admin users" });
           }
-        );
 
-        if (result.matchedCount === 0) {
-          return res.status(404).send({ 
-            success: false, 
-            message: "User not found" 
+          const newBlockStatus = !targetUser.isBlocked;
+
+          await usersCollection.updateOne(
+            { email: targetEmail },
+            { $set: { isBlocked: newBlockStatus, updatedAt: new Date() } }
+          );
+
+          res.send({
+            success: true,
+            message: `User ${newBlockStatus ? "blocked" : "unblocked"} successfully`,
+            isBlocked: newBlockStatus,
+          });
+        } catch (error) {
+          console.error("Error toggling block status:", error);
+          res.status(500).send({
+            success: false,
+            message: "Failed to update user",
+            error: error.message,
           });
         }
-
-        res.send({ 
-          success: true, 
-          message: `User role updated to ${role}`,
-          modifiedCount: result.modifiedCount
-        });
-      } catch (error) {
-        console.error("Error updating role:", error);
-        res.status(500).send({ 
-          success: false, 
-          message: "Failed to update role",
-          error: error.message 
-        });
       }
-    });
-
-    // ✅ TOGGLE USER BLOCK STATUS (admin only)
-    app.patch("/users/:email/toggle-block", verifyToken, async (req, res) => {
-      try {
-        const tokenEmail = req.decoded.email;
-        const targetEmail = req.params.email;
-
-        // Check if requester is admin
-        const requester = await usersCollection.findOne({ email: tokenEmail });
-        if (!requester || requester.role !== "admin") {
-          return res.status(403).send({ 
-            success: false, 
-            message: "Admin access required" 
-          });
-        }
-
-        // Get target user
-        const targetUser = await usersCollection.findOne({ email: targetEmail });
-        if (!targetUser) {
-          return res.status(404).send({ 
-            success: false, 
-            message: "User not found" 
-          });
-        }
-
-        // Prevent blocking admins
-        if (targetUser.role === "admin") {
-          return res.status(400).send({ 
-            success: false, 
-            message: "Cannot block admin users" 
-          });
-        }
-
-        const newBlockStatus = !targetUser.isBlocked;
-        
-        await usersCollection.updateOne(
-          { email: targetEmail },
-          { 
-            $set: { 
-              isBlocked: newBlockStatus,
-              updatedAt: new Date() 
-            } 
-          }
-        );
-
-        res.send({ 
-          success: true, 
-          message: `User ${newBlockStatus ? "blocked" : "unblocked"} successfully`,
-          isBlocked: newBlockStatus
-        });
-      } catch (error) {
-        console.error("Error toggling block status:", error);
-        res.status(500).send({ 
-          success: false, 
-          message: "Failed to update user",
-          error: error.message 
-        });
-      }
-    });
+    );
 
     /* =========================
-       ✅ ISSUES ENDPOINTS
+       ✅ PUBLIC ISSUES LIST (filters + pagination)
        ========================= */
-
-    // ✅ GET ALL ISSUES (public with filters)
     app.get("/issues", async (req, res) => {
       try {
-        console.log("📝 GET /issues called with query:", req.query);
-        
         const page = parseInt(req.query.page) || 1;
         const limit = parseInt(req.query.limit) || 6;
         const skip = (page - 1) * limit;
 
-        // Query parameters
         const search = (req.query.search || "").trim();
         const category = (req.query.category || "all").trim();
         const status = (req.query.status || "all").trim();
         const priority = (req.query.priority || "all").trim();
         const reportedBy = (req.query.reportedBy || "").trim();
 
-        // Build filter
         const filter = {};
-        
-        // Category filter
-        if (category !== "all") {
-          filter.category = category;
-        }
-        
-        // Status filter
-        if (status !== "all") {
-          filter.status = status;
-        }
-        
-        // Priority filter
-        if (priority !== "all") {
-          filter.priority = priority;
-        }
-        
-        // Reported by filter (for "My Issues" page)
+        if (category !== "all") filter.category = category;
+        if (status !== "all") filter.status = status;
+        if (priority !== "all") filter.priority = priority;
+
+        // ✅ compatible with BOTH: string and object formats
         if (reportedBy) {
-          filter.reportedBy = reportedBy;
-        }
-        
-        // Search filter
-        if (search) {
-          const regex = new RegExp(search, "i");
           filter.$or = [
-            { title: regex },
-            { category: regex },
-            { location: regex },
-            { description: regex }
+            { reportedBy: reportedBy },
+            { userEmail: reportedBy },
+            { "reportedBy.email": reportedBy },
+            { reportedByEmail: reportedBy },
           ];
         }
 
-        console.log("🔍 MongoDB filter:", JSON.stringify(filter, null, 2));
+        if (search) {
+          const regex = new RegExp(search, "i");
+          filter.$or = [
+            ...(filter.$or || []),
+            { title: regex },
+            { category: regex },
+            { location: regex },
+            { description: regex },
+          ];
+        }
 
-        // Count total matching documents
         const total = await issuesCollection.countDocuments(filter);
-        
-        // Get paginated results
+
         const issues = await issuesCollection
           .find(filter)
-          .sort({ createdAt: -1 }) // Newest first
+          .sort({ createdAt: -1 })
           .skip(skip)
           .limit(limit)
           .toArray();
 
-        console.log(`✅ Found ${issues.length} issues out of ${total}`);
-
-        // Calculate pagination info
-        const totalPages = Math.ceil(total / limit);
+        const totalPages = Math.max(1, Math.ceil(total / limit));
 
         res.send({
           success: true,
@@ -469,515 +421,672 @@ async function run() {
           page,
           limit,
           issues,
-          hasMore: page < totalPages
+          hasMore: page < totalPages,
         });
       } catch (error) {
-        console.error("❌ Error in /issues route:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to load issues",
-          error: error.message
-        });
+        console.error("❌ Error in /issues:", error);
+        res
+          .status(500)
+          .send({ success: false, message: "Failed to load issues", error: error.message });
       }
     });
 
-    // ✅ GET SINGLE ISSUE DETAILS
+    // ✅ GET SINGLE ISSUE
     app.get("/issues/:id", async (req, res) => {
       try {
         const { id } = req.params;
+        if (!ObjectId.isValid(id))
+          return res.status(400).send({ success: false, message: "Invalid issue ID format" });
 
-        // Validate ObjectId
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).send({
-            success: false,
-            message: "Invalid issue ID format"
-          });
-        }
+        const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+        if (!issue) return res.status(404).send({ success: false, message: "Issue not found" });
 
-        const issue = await issuesCollection.findOne({
-          _id: new ObjectId(id)
-        });
-
-        if (!issue) {
-          return res.status(404).send({
-            success: false,
-            message: "Issue not found"
-          });
-        }
-
-        res.send({
-          success: true,
-          issue
-        });
+        res.send({ success: true, issue });
       } catch (error) {
         console.error("Error fetching issue:", error);
         res.status(500).send({
           success: false,
           message: "Failed to load issue details",
-          error: error.message
+          error: error.message,
         });
       }
     });
 
-    // ✅ CREATE NEW ISSUE (secured)
-    app.post("/issues", verifyToken, async (req, res) => {
+    /* =========================
+       ✅ UPDATE ISSUE (Citizen can edit only own pending issue)
+       ========================= */
+    app.patch("/issues/:id", verifyToken, async (req, res) => {
       try {
-        const userEmail = req.decoded.email;
-        
-        // Check if user exists and is not blocked
-        const user = await usersCollection.findOne({ email: userEmail });
-        if (!user) {
-          return res.status(404).send({
-            success: false,
-            message: "User not found. Please login again."
-          });
+        const { id } = req.params;
+        const email = req.decoded.email;
+
+        if (!ObjectId.isValid(id)) {
+          return res.status(400).send({ success: false, message: "Invalid issue ID" });
         }
 
-        if (user.isBlocked) {
-          return res.status(403).send({
-            success: false,
-            message: "Your account is blocked. Cannot submit issues."
-          });
+        const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+        if (!issue) return res.status(404).send({ success: false, message: "Issue not found" });
+
+        // ✅ owner check compatible with BOTH structures
+        const ownerEmail =
+          typeof issue.reportedBy === "string" ? issue.reportedBy : issue?.reportedBy?.email;
+
+        if (ownerEmail !== email) {
+          return res.status(403).send({ success: false, message: "Forbidden: Not your issue" });
         }
 
-        // Check issue limit for non-premium users
-        if (!user.isPremium) {
-          const userIssueCount = await issuesCollection.countDocuments({
-            reportedBy: userEmail
-          });
-          
-          if (userIssueCount >= 3) {
-            return res.status(403).send({
-              success: false,
-              message: "Free users can only submit 3 issues. Upgrade to premium for unlimited submissions."
-            });
-          }
+        // only pending editable
+        if ((issue.status || "").toLowerCase() !== "pending") {
+          return res
+            .status(400)
+            .send({ success: false, message: "Only pending issues can be edited" });
         }
 
-        const issueData = {
-          ...req.body,
-          reportedBy: userEmail,
-          status: "pending", // Default status
-          priority: req.body.priority || "normal", // Default priority
-          upvoteCount: 0,
-          upvotedBy: [],
-          commentCount: 0,
-          isBoosted: false,
-          createdAt: new Date(),
-          updatedAt: new Date()
+        const { title, description, category, location, image, priority } = req.body || {};
+
+        const $set = { updatedAt: new Date() };
+        if (title !== undefined) $set.title = title;
+        if (description !== undefined) $set.description = description;
+        if (category !== undefined) $set.category = category;
+        if (location !== undefined) $set.location = location;
+        if (priority !== undefined) $set.priority = priority;
+
+        // ✅ keep image as string (URL/base64/empty) — you can finalize later
+        if (image !== undefined) $set.image = image;
+
+        const timelineItem = {
+          status: "pending",
+          message: "Issue updated by citizen",
+          updatedBy:
+            issue?.reportedByName ||
+            issue?.reportedBy?.name ||
+            email,
+          date: new Date(),
         };
 
-        // Validate required fields
-        const requiredFields = ["title", "category", "location", "description"];
-        for (const field of requiredFields) {
-          if (!issueData[field]?.trim()) {
-            return res.status(400).send({
-              success: false,
-              message: `Field "${field}" is required`
-            });
-          }
+        const result = await issuesCollection.findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          { $set, $push: { timeline: timelineItem } },
+          { returnDocument: "after" }
+        );
+
+        res.send({ success: true, message: "Issue updated", issue: result.value });
+      } catch (error) {
+        console.error("Error updating issue:", error);
+        res.status(500).send({
+          success: false,
+          message: "Failed to update issue",
+          error: error.message,
+        });
+      }
+    });
+
+    /* =========================
+       ✅ CREATE ISSUE (Citizen only)
+       ========================= */
+    app.post("/issues", verifyToken, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+        const user = await usersCollection.findOne({ email });
+
+        if (!user) return res.status(404).send({ success: false, message: "User not found" });
+        if (user.isBlocked)
+          return res.status(403).send({ success: false, message: "Blocked users cannot report issues" });
+
+        // Check if free user has exceeded limit
+        if (!user.isPremium && (user.issueCount || 0) >= 3) {
+          return res.status(400).send({
+            success: false,
+            message: "Free users can only report 3 issues. Please upgrade to premium.",
+          });
         }
 
-        // Insert issue
-        const result = await issuesCollection.insertOne(issueData);
-        
-        // Update user's issue count
+        const { title, description, category, location, image, priority } = req.body || {};
+
+        if (!title || !description || !category || !location) {
+          return res.status(400).send({ success: false, message: "All required fields must be filled" });
+        }
+
+        // ✅ IMPORTANT: store reportedBy as STRING to match your current DB
+        const issueDoc = {
+          title,
+          description,
+          category,
+          location,
+          image: image || "",
+          priority: priority || "normal",
+          status: "pending",
+
+          // ✅ keep both fields compatible
+          upvoteCount: 0,
+          // upvotes: 0,
+          upvotedBy: [],
+
+          // ✅ string-based owner + extra fields (optional but useful)
+          reportedBy: user.email,          // ✅ STRING
+          userEmail: user.email,           // optional/legacy
+          reportedByName: user.name || "", // optional
+          reportedByPhotoURL: user.photoURL || "",
+
+          assignedTo: null,
+          timeline: [
+            {
+              status: "pending",
+              message: "Issue reported",
+              updatedBy: user.name || user.email,
+              date: new Date(),
+            },
+          ],
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+
+        const result = await issuesCollection.insertOne(issueDoc);
+
+        // Increment user's issue count
         await usersCollection.updateOne(
-          { email: userEmail },
-          { $inc: { issueCount: 1 } }
+          { email },
+          { $inc: { issueCount: 1 }, $set: { updatedAt: new Date() } }
         );
 
         res.status(201).send({
           success: true,
           message: "Issue reported successfully",
           issueId: result.insertedId,
-          issue: issueData
+          issue: issueDoc,
         });
       } catch (error) {
         console.error("Error creating issue:", error);
         res.status(500).send({
           success: false,
-          message: "Failed to create issue",
-          error: error.message
-        });
-      }
-    });
-
-    // ✅ UPDATE ISSUE (secured - only reporter or admin)
-    app.patch("/issues/:id", verifyToken, async (req, res) => {
-      try {
-        const { id } = req.params;
-        const userEmail = req.decoded.email;
-        const updateData = req.body;
-
-        // Validate ObjectId
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).send({
-            success: false,
-            message: "Invalid issue ID format"
-          });
-        }
-
-        // Find the issue
-        const issue = await issuesCollection.findOne({
-          _id: new ObjectId(id)
-        });
-
-        if (!issue) {
-          return res.status(404).send({
-            success: false,
-            message: "Issue not found"
-          });
-        }
-
-        // Check permissions
-        const user = await usersCollection.findOne({ email: userEmail });
-        const isAdmin = user?.role === "admin";
-        const isReporter = issue.reportedBy === userEmail;
-
-        if (!isAdmin && !isReporter) {
-          return res.status(403).send({
-            success: false,
-            message: "You can only update your own issues"
-          });
-        }
-
-        // Define allowed fields to update
-        const allowedFields = [
-          "title", 
-          "category", 
-          "location", 
-          "description", 
-          "priority",
-          "image",
-          "status" // Only admin can update status
-        ];
-
-        const $set = {};
-        for (const field of allowedFields) {
-          if (updateData[field] !== undefined) {
-            // Only admin can update status field
-            if (field === "status" && !isAdmin) {
-              continue;
-            }
-            $set[field] = updateData[field];
-          }
-        }
-
-        if (Object.keys($set).length === 0) {
-          return res.status(400).send({
-            success: false,
-            message: "No valid fields to update"
-          });
-        }
-
-        $set.updatedAt = new Date();
-
-        const result = await issuesCollection.findOneAndUpdate(
-          { _id: new ObjectId(id) },
-          { $set },
-          { returnDocument: "after" }
-        );
-
-        res.send({
-          success: true,
-          message: "Issue updated successfully",
-          issue: result.value
-        });
-      } catch (error) {
-        console.error("Error updating issue:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to update issue",
-          error: error.message
-        });
-      }
-    });
-
-    // ✅ DELETE ISSUE (secured - only reporter or admin)
-    app.delete("/issues/:id", verifyToken, async (req, res) => {
-      try {
-        const { id } = req.params;
-        const userEmail = req.decoded.email;
-
-        // Validate ObjectId
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).send({
-            success: false,
-            message: "Invalid issue ID format"
-          });
-        }
-
-        // Find the issue
-        const issue = await issuesCollection.findOne({
-          _id: new ObjectId(id)
-        });
-
-        if (!issue) {
-          return res.status(404).send({
-            success: false,
-            message: "Issue not found"
-          });
-        }
-
-        // Check permissions
-        const user = await usersCollection.findOne({ email: userEmail });
-        const isAdmin = user?.role === "admin";
-        const isReporter = issue.reportedBy === userEmail;
-
-        if (!isAdmin && !isReporter) {
-          return res.status(403).send({
-            success: false,
-            message: "You can only delete your own issues"
-          });
-        }
-
-        // Delete the issue
-        const result = await issuesCollection.deleteOne({
-          _id: new ObjectId(id)
-        });
-
-        if (result.deletedCount === 0) {
-          return res.status(404).send({
-            success: false,
-            message: "Issue not found or already deleted"
-          });
-        }
-
-        // Update user's issue count
-        await usersCollection.updateOne(
-          { email: issue.reportedBy },
-          { $inc: { issueCount: -1 } }
-        );
-
-        res.send({
-          success: true,
-          message: "Issue deleted successfully",
-          deletedCount: result.deletedCount
-        });
-      } catch (error) {
-        console.error("Error deleting issue:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to delete issue",
-          error: error.message
-        });
-      }
-    });
-
-    // ✅ UPVOTE ISSUE
-    app.patch("/issues/:id/upvote", async (req, res) => {
-      try {
-        const { id } = req.params;
-        const { userEmail } = req.body;
-
-        if (!userEmail) {
-          return res.status(401).send({
-            success: false,
-            message: "Login required to upvote"
-          });
-        }
-
-        // Validate ObjectId
-        if (!ObjectId.isValid(id)) {
-          return res.status(400).send({
-            success: false,
-            message: "Invalid issue ID format"
-          });
-        }
-
-        // Find the issue
-        const issue = await issuesCollection.findOne({
-          _id: new ObjectId(id)
-        });
-
-        if (!issue) {
-          return res.status(404).send({
-            success: false,
-            message: "Issue not found"
-          });
-        }
-
-        // Check if user is blocked
-        const user = await usersCollection.findOne({ email: userEmail });
-        if (user?.isBlocked) {
-          return res.status(403).send({
-            success: false,
-            message: "Your account is blocked. Cannot upvote."
-          });
-        }
-
-        // Cannot upvote own issue
-        if (issue.reportedBy === userEmail) {
-          return res.status(400).send({
-            success: false,
-            message: "You cannot upvote your own issue"
-          });
-        }
-
-        // Check if already upvoted
-        if (issue.upvotedBy?.includes(userEmail)) {
-          return res.status(400).send({
-            success: false,
-            message: "You already upvoted this issue"
-          });
-        }
-
-        // Add upvote
-        const result = await issuesCollection.updateOne(
-          { _id: new ObjectId(id) },
-          {
-            $inc: { upvoteCount: 1 },
-            $push: { upvotedBy: userEmail },
-            $set: { updatedAt: new Date() }
-          }
-        );
-
-        res.send({
-          success: true,
-          message: "Upvoted successfully",
-          upvoteCount: issue.upvoteCount + 1,
-          modifiedCount: result.modifiedCount
-        });
-      } catch (error) {
-        console.error("Error upvoting issue:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to upvote issue",
-          error: error.message
+          message: "Failed to report issue",
+          error: error.message,
         });
       }
     });
 
     /* =========================
-       ✅ ADMIN STATS ENDPOINTS
+       ✅ ADMIN ENDPOINTS
        ========================= */
 
-    // ✅ GET DASHBOARD STATS (admin only)
-    app.get("/admin/stats", verifyToken, async (req, res) => {
+    // ✅ GET STAFF LIST (admin only)
+    app.get("/admin/staff", verifyToken, requireAdmin, async (req, res) => {
       try {
-        const tokenEmail = req.decoded.email;
-        const requester = await usersCollection.findOne({ email: tokenEmail });
+        const staff = await usersCollection
+          .find(
+            { role: "staff" },
+            { projection: { email: 1, name: 1, photoURL: 1, role: 1 } }
+          )
+          .sort({ createdAt: -1 })
+          .toArray();
 
-        if (!requester || requester.role !== "admin") {
-          return res.status(403).send({
-            success: false,
-            message: "Admin access required"
-          });
+        res.send({ success: true, staff });
+      } catch (error) {
+        console.error("Error loading staff:", error);
+        res.status(500).send({
+          success: false,
+          message: "Failed to load staff",
+          error: error.message,
+        });
+      }
+    });
+
+    // ✅ GET ALL ISSUES (admin only) — stable sort + allowDiskUse
+    app.get("/admin/issues", verifyToken, requireAdmin, async (req, res) => {
+      try {
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        // filters (keep simple, can expand later)
+        const filter = {};
+
+        const total = await issuesCollection.countDocuments(filter);
+
+        // ✅ sort "high" first without memory crash
+        const issues = await issuesCollection
+          .aggregate(
+            [
+              { $match: filter },
+              {
+                $addFields: {
+                  _priorityRank: {
+                    $cond: [{ $eq: ["$priority", "high"] }, 1, 0],
+                  },
+                },
+              },
+              { $sort: { _priorityRank: -1, createdAt: -1 } },
+              { $skip: skip },
+              { $limit: limit },
+            ],
+            { allowDiskUse: true }
+          )
+          .toArray();
+
+        const totalPages = Math.max(1, Math.ceil(total / limit));
+
+        res.send({
+          success: true,
+          issues,
+          total,
+          page,
+          limit,
+          totalPages,
+          hasMore: page < totalPages,
+        });
+      } catch (error) {
+        console.error("❌ Error in /admin/issues:", error);
+        res.status(500).send({
+          success: false,
+          message: "Failed to load admin issues",
+          error: error.message,
+        });
+      }
+    });
+
+    // ✅ ASSIGN STAFF (admin only)
+    app.patch("/admin/issues/:id/assign-staff", verifyToken, requireAdmin, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { staffEmail } = req.body || {};
+
+        if (!ObjectId.isValid(id)) return res.status(400).send({ success: false, message: "Invalid issue ID" });
+        if (!staffEmail) return res.status(400).send({ success: false, message: "staffEmail is required" });
+
+        const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+        if (!issue) return res.status(404).send({ success: false, message: "Issue not found" });
+
+        if (issue?.assignedTo?.email) {
+          return res.status(400).send({ success: false, message: "This issue is already assigned" });
         }
 
-        // Get counts
+        const staff = await usersCollection.findOne({ email: staffEmail, role: "staff" });
+        if (!staff) return res.status(404).send({ success: false, message: "Staff user not found" });
+
+        const assignedTo = {
+          email: staff.email,
+          name: staff.name || staff.email,
+          photoURL: staff.photoURL || "",
+          assignedAt: new Date(),
+        };
+
+        const timelineItem = {
+          status: issue.status || "pending",
+          message: `Issue assigned to staff: ${assignedTo.name}`,
+          updatedBy: "Admin",
+          date: new Date(),
+        };
+
+        const result = await issuesCollection.findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          {
+            $set: { assignedTo, updatedAt: new Date() },
+            $push: { timeline: timelineItem },
+          },
+          { returnDocument: "after" }
+        );
+
+        res.send({ success: true, message: "Staff assigned", issue: result.value });
+      } catch (error) {
+        console.error("Error assigning staff:", error);
+        res.status(500).send({ success: false, message: "Failed to assign staff", error: error.message });
+      }
+    });
+
+    // ✅ REJECT ISSUE (admin only)
+    app.patch("/admin/issues/:id/reject", verifyToken, requireAdmin, async (req, res) => {
+      try {
+        const { id } = req.params;
+        if (!ObjectId.isValid(id)) return res.status(400).send({ success: false, message: "Invalid issue ID" });
+
+        const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+        if (!issue) return res.status(404).send({ success: false, message: "Issue not found" });
+
+        const status = (issue.status || "pending").toLowerCase();
+        if (status !== "pending") {
+          return res.status(400).send({ success: false, message: "Can only reject pending issues" });
+        }
+
+        const timelineItem = {
+          status: "rejected",
+          message: "Issue rejected by admin",
+          updatedBy: "Admin",
+          date: new Date(),
+        };
+
+        const result = await issuesCollection.findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          {
+            $set: { status: "rejected", updatedAt: new Date() },
+            $push: { timeline: timelineItem },
+          },
+          { returnDocument: "after" }
+        );
+
+        res.send({ success: true, message: "Issue rejected", issue: result.value });
+      } catch (error) {
+        console.error("Error rejecting issue:", error);
+        res.status(500).send({ success: false, message: "Failed to reject issue", error: error.message });
+      }
+    });
+
+    // ✅ GET ISSUE STATISTICS (admin only)
+    app.get("/admin/stats", verifyToken, requireAdmin, async (req, res) => {
+      try {
         const totalUsers = await usersCollection.countDocuments();
         const totalIssues = await issuesCollection.countDocuments();
         const pendingIssues = await issuesCollection.countDocuments({ status: "pending" });
         const resolvedIssues = await issuesCollection.countDocuments({ status: "resolved" });
         const inProgressIssues = await issuesCollection.countDocuments({ status: "in-progress" });
+        const rejectedIssues = await issuesCollection.countDocuments({ status: "rejected" });
 
-        // Get recent issues
-        const recentIssues = await issuesCollection
-          .find()
-          .sort({ createdAt: -1 })
-          .limit(10)
-          .toArray();
-
-        // Get user distribution by role
-        const citizenCount = await usersCollection.countDocuments({ role: "citizen" });
-        const staffCount = await usersCollection.countDocuments({ role: "staff" });
-        const adminCount = await usersCollection.countDocuments({ role: "admin" });
+        const recentIssues = await issuesCollection.find().sort({ createdAt: -1 }).limit(6).toArray();
+        const recentUsers = await usersCollection.find().sort({ createdAt: -1 }).limit(6).toArray();
 
         res.send({
           success: true,
           stats: {
-            users: {
-              total: totalUsers,
-              citizen: citizenCount,
-              staff: staffCount,
-              admin: adminCount,
-              blocked: await usersCollection.countDocuments({ isBlocked: true }),
-              premium: await usersCollection.countDocuments({ isPremium: true })
-            },
+            users: { total: totalUsers },
             issues: {
               total: totalIssues,
               pending: pendingIssues,
               resolved: resolvedIssues,
               inProgress: inProgressIssues,
-              highPriority: await issuesCollection.countDocuments({ priority: "high" })
-            }
+              rejected: rejectedIssues,
+              highPriority: await issuesCollection.countDocuments({ priority: "high" }),
+            },
+            payments: { totalReceived: 0 },
           },
-          recentIssues
+          recentIssues,
+          recentUsers,
         });
       } catch (error) {
         console.error("Error fetching admin stats:", error);
+        res.status(500).send({ success: false, message: "Failed to load admin stats", error: error.message });
+      }
+    });
+
+    /* =========================
+       ✅ CITIZEN ENDPOINTS
+       ========================= */
+
+    // ✅ GET MY ISSUES (citizen)
+    app.get("/my-issues", verifyToken, async (req, res) => {
+      try {
+        // ✅ FIX: you do NOT have req.user; you have req.decoded
+        const email = req.decoded.email;
+
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 20;
+        const skip = (page - 1) * limit;
+
+        // ✅ compatible with all historical shapes
+        const filter = {
+          $or: [
+            { reportedBy: email },
+            { userEmail: email },
+            { reportedByEmail: email },
+            { "reportedBy.email": email },
+          ],
+        };
+
+        const total = await issuesCollection.countDocuments(filter);
+
+        const issues = await issuesCollection
+          .find(filter)
+          .sort({ createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        res.send({ success: true, issues, total, page, limit });
+      } catch (err) {
+        console.error("Error in /my-issues:", err);
+        res.status(500).send({ success: false, message: "Failed to load my issues" });
+      }
+    });
+
+    // ✅ UPVOTE ISSUE (token required)
+app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
+  try {
+    console.log("📝 Upvote request received");
+
+    const { id } = req.params;
+    const email = req.decoded.email;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ success: false, message: "Invalid issue ID" });
+    }
+
+    const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+    if (!issue) {
+      return res.status(404).send({ success: false, message: "Issue not found" });
+    }
+
+    const ownerEmail = issue.userEmail || issue.reportedBy;
+    if (ownerEmail === email) {
+      return res.status(400).send({
+        success: false,
+        message: "You cannot upvote your own issue",
+      });
+    }
+
+    if (issue.upvotedBy?.includes(email)) {
+      return res.status(400).send({
+        success: false,
+        message: "You have already upvoted this issue",
+      });
+    }
+
+    await issuesCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $inc: { upvoteCount: 1 },
+        $push: { upvotedBy: email },
+        $set: { updatedAt: new Date() },
+      }
+    );
+
+    res.send({
+      success: true,
+      message: "Issue upvoted",
+      upvoteCount: (issue.upvoteCount || 0) + 1,
+      hasUpvoted: true,
+    });
+  } catch (error) {
+    console.error("❌ Error upvoting issue:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to upvote issue",
+    });
+  }
+});
+
+// UPVOTE ISSUE-details page (token required)
+
+app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const email = req.decoded.email;
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ success: false, message: "Invalid issue ID" });
+    }
+
+    const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+    if (!issue) {
+      return res.status(404).send({ success: false, message: "Issue not found" });
+    }
+
+    // ✅ owner check (STRING-based, consistent)
+    const ownerEmail = issue.reportedBy;
+    if (ownerEmail === email) {
+      return res.status(400).send({
+        success: false,
+        message: "You cannot upvote your own issue",
+      });
+    }
+
+    // ✅ prevent double upvote
+    if (issue.upvotedBy?.includes(email)) {
+      return res.status(400).send({
+        success: false,
+        message: "You have already upvoted this issue",
+      });
+    }
+
+    // ✅ atomic update
+    await issuesCollection.updateOne(
+      { _id: new ObjectId(id) },
+      {
+        $inc: { upvoteCount: 1 },
+        $push: { upvotedBy: email },
+        $set: { updatedAt: new Date() },
+      }
+    );
+
+    return res.send({
+      success: true,
+      message: "Issue upvoted",
+    });
+  } catch (error) {
+    console.error("❌ Error upvoting issue:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to upvote issue",
+    });
+  }
+});
+
+
+    /* =========================
+       ✅ STAFF ENDPOINTS
+       ========================= */
+
+    app.get("/staff/issues", verifyToken, requireStaff, async (req, res) => {
+      try {
+        const email = req.decoded.email;
+        const page = parseInt(req.query.page) || 1;
+        const limit = parseInt(req.query.limit) || 10;
+        const skip = (page - 1) * limit;
+
+        const filter = { "assignedTo.email": email };
+
+        const status = (req.query.status || "all").trim();
+        if (status !== "all") filter.status = status;
+
+        const total = await issuesCollection.countDocuments(filter);
+
+        const issues = await issuesCollection
+          .find(filter)
+          .sort({ priority: -1, createdAt: -1 })
+          .skip(skip)
+          .limit(limit)
+          .toArray();
+
+        const totalPages = Math.ceil(total / limit);
+
+        res.send({ success: true, issues, total, page, limit, totalPages });
+      } catch (error) {
+        console.error("Error fetching staff issues:", error);
         res.status(500).send({
           success: false,
-          message: "Failed to load admin stats",
-          error: error.message
+          message: "Failed to load assigned issues",
+          error: error.message,
+        });
+      }
+    });
+
+    app.patch("/staff/issues/:id/status", verifyToken, requireStaff, async (req, res) => {
+      try {
+        const { id } = req.params;
+        const { status } = req.body;
+        const staffEmail = req.decoded.email;
+
+        if (!ObjectId.isValid(id)) return res.status(400).send({ success: false, message: "Invalid issue ID" });
+        if (!status) return res.status(400).send({ success: false, message: "Status is required" });
+
+        const issue = await issuesCollection.findOne({
+          _id: new ObjectId(id),
+          "assignedTo.email": staffEmail,
+        });
+
+        if (!issue) {
+          return res.status(404).send({ success: false, message: "Issue not found or not assigned to you" });
+        }
+
+        const validStatuses = ["pending", "in-progress", "working", "resolved", "closed"];
+        if (!validStatuses.includes(status)) {
+          return res.status(400).send({ success: false, message: "Invalid status" });
+        }
+
+        const timelineItem = {
+          status,
+          message: `Status changed to ${status}`,
+          updatedBy: "Staff",
+          date: new Date(),
+        };
+
+        const result = await issuesCollection.findOneAndUpdate(
+          { _id: new ObjectId(id) },
+          { $set: { status, updatedAt: new Date() }, $push: { timeline: timelineItem } },
+          { returnDocument: "after" }
+        );
+
+        res.send({ success: true, message: "Status updated", issue: result.value });
+      } catch (error) {
+        console.error("Error updating status:", error);
+        res.status(500).send({
+          success: false,
+          message: "Failed to update status",
+          error: error.message,
         });
       }
     });
 
     /* =========================
-       ✅ SETUP ADMIN (One-time use)
+       ✅ SETUP ADMIN (one-time)
        ========================= */
     app.post("/setup-admin", async (req, res) => {
       try {
-        const { email, secret } = req.body;
-        
-        // Secret key for security (change this in production)
-        const ADMIN_SECRET = "123456";
-        
-        if (secret !== ADMIN_SECRET) {
-          return res.status(403).send({
+        const { email, secret } = req.body || {};
+        const ADMIN_SECRET = (process.env.ADMIN_SETUP_SECRET || "").trim();
+
+        if (!ADMIN_SECRET) {
+          return res.status(500).send({
             success: false,
-            message: "Invalid secret key"
+            message: "ADMIN_SETUP_SECRET is missing in server .env",
           });
         }
 
-        if (!email) {
-          return res.status(400).send({
-            success: false,
-            message: "Email is required"
-          });
+        if ((secret || "").trim() !== ADMIN_SECRET) {
+          return res.status(403).send({ success: false, message: "Invalid secret key" });
         }
 
-        // Check if user exists
+        if (!email) return res.status(400).send({ success: false, message: "Email is required" });
+
         const user = await usersCollection.findOne({ email });
-        
         if (!user) {
-          return res.status(404).send({
-            success: false,
-            message: "User not found. Please register first."
-          });
+          return res.status(404).send({ success: false, message: "User not found. Please register first." });
         }
 
-        // Update to admin
         await usersCollection.updateOne(
           { email },
-          {
-            $set: {
-              role: "admin",
-              isPremium: true,
-              updatedAt: new Date()
-            }
-          }
+          { $set: { role: "admin", isPremium: true, updatedAt: new Date() } }
         );
 
-        res.send({
-          success: true,
-          message: `✅ ${email} is now an admin with premium access`
-        });
+        res.send({ success: true, message: `✅ ${email} is now admin` });
       } catch (error) {
         console.error("Error setting up admin:", error);
         res.status(500).send({
           success: false,
           message: "Failed to setup admin",
-          error: error.message
+          error: error.message,
         });
       }
     });
 
     console.log("✅ All routes loaded successfully");
-
   } catch (error) {
     console.error("❌ MongoDB connection error:", error);
     process.exit(1);
@@ -989,5 +1098,5 @@ run().catch(console.dir);
 app.listen(port, () => {
   console.log(`🚀 Server running on port ${port}`);
   console.log(`🌐 Health check: http://localhost:${port}/health`);
-  console.log(`📊 Admin setup: POST http://localhost:${port}/setup-admin`);
+  console.log(`📊 Admin setup endpoint: POST http://localhost:${port}/setup-admin`);
 });
