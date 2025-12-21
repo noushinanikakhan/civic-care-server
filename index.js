@@ -172,12 +172,12 @@ app.post("/users", async (req, res) => {
     }
 
     // ✅ You said you're using Unsplash/public links, so require it
-    if (!safePhotoURL) {
-      return res.status(400).send({
-        success: false,
-        message: "photoURL is required (paste an Unsplash/public image URL)",
-      });
-    }
+    // if (!safePhotoURL) {
+    //   return res.status(400).send({
+    //     success: false,
+    //     message: "photoURL is required (paste an Unsplash/public image URL)",
+    //   });
+    // }
 
     const existingUser = await usersCollection.findOne({ email: safeEmail });
 
@@ -327,23 +327,28 @@ app.get("/users/profile/:email", verifyToken, async (req, res) => {
             .send({ success: false, message: "No valid fields to update" });
         }
 
-        const result = await usersCollection.findOneAndUpdate(
-          { email },
-          { $set },
-          { returnDocument: "after" }
-        );
+   const result = await usersCollection.findOneAndUpdate(
+  { email },
+  {
+    $set,
+    $setOnInsert: {
+      email,
+      role: "citizen",
+      createdAt: new Date(),
+      isBlocked: false,
+      isPremium: false,
+      issueCount: 0,
+    },
+  },
+  { upsert: true, returnDocument: "after" }
+);
 
-        if (!result.value) {
-          return res
-            .status(404)
-            .send({ success: false, message: "User not found" });
-        }
+res.send({
+  success: true,
+  message: "Profile updated",
+  user: result.value,
+});
 
-        res.send({
-          success: true,
-          message: "Profile updated",
-          user: result.value,
-        });
       } catch (error) {
         console.error("Error updating profile:", error);
         res.status(500).send({
@@ -1253,16 +1258,15 @@ if (status !== "all") {
 const rawStatus = String(status).trim().toLowerCase();
 
 // staff can submit these
-const allowedStaffStatuses = ["in-progress", "working", "resolved", "closed"];
+
+// ✅ normalize to keep DB consistent with your dashboards
+const allowedStaffStatuses = ["in-progress", "resolved"];
 if (!allowedStaffStatuses.includes(rawStatus)) {
   return res.status(400).send({ success: false, message: "Invalid status" });
 }
 
-// ✅ normalize to keep DB consistent with your dashboards
-const normalizedStatus =
-  rawStatus === "working" ? "in-progress" :
-  rawStatus === "closed" ? "resolved" :
-  rawStatus;
+const normalizedStatus = rawStatus;
+
 
 // ✅ timeline keeps the audit meaning (closed/working) without breaking UI
 const timelineItem = {
