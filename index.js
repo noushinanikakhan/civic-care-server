@@ -152,110 +152,162 @@ async function run() {
        ========================= */
 
     // ✅ CREATE USER
-    app.post("/users", async (req, res) => {
-      try {
-        const { email, name, photoURL } = req.body;
+/* =========================
+   ✅ USERS
+   ========================= */
 
-        if (!email) {
-          return res
-            .status(400)
-            .send({ success: false, message: "Email is required" });
-        }
+// ✅ CREATE/UPSERT USER (registration + google + login safety)
+app.post("/users", async (req, res) => {
+  try {
+    const { email, name, photoURL } = req.body || {};
 
-        const existingUser = await usersCollection.findOne({ email });
-        if (existingUser) {
-          return res.send({
-            success: true,
-            message: "User already exists",
-            user: existingUser,
-          });
-        }
+    const safeEmail = (email || "").trim().toLowerCase();
+    const safeName = (name || "").trim();
+    const safePhotoURL = (photoURL || "").trim();
 
-        const userDoc = {
-          email,
-          name: name || email.split("@")[0],
-          photoURL: photoURL || "",
-          role: "citizen",
-          isPremium: false,
-          isBlocked: false,
-          issueCount: 0,
-          createdAt: new Date(),
-          updatedAt: new Date(),
-        };
+    if (!safeEmail) {
+      return res
+        .status(400)
+        .send({ success: false, message: "Email is required" });
+    }
 
-        const result = await usersCollection.insertOne(userDoc);
+    // ✅ You said you're using Unsplash/public links, so require it
+    if (!safePhotoURL) {
+      return res.status(400).send({
+        success: false,
+        message: "photoURL is required (paste an Unsplash/public image URL)",
+      });
+    }
 
-        res.status(201).send({
-          success: true,
-          message: "User created successfully",
-          userId: result.insertedId,
-          user: userDoc,
-        });
-      } catch (error) {
-        console.error("Error creating user:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to create user",
-          error: error.message,
-        });
-      }
+    const existingUser = await usersCollection.findOne({ email: safeEmail });
+
+    /**
+     * ✅ ROOT CAUSE FIX:
+     * Do NOT set the same field in $set and $setOnInsert.
+     * Put name/photoURL only in $set (works for insert + update).
+     */
+    const updateDoc = {
+      $set: {
+        email: safeEmail,
+        name: safeName || safeEmail.split("@")[0],
+        photoURL: safePhotoURL,
+        updatedAt: new Date(),
+      },
+      $setOnInsert: {
+        role: "citizen",
+        isPremium: false,
+        isBlocked: false,
+        issueCount: 0,
+        createdAt: new Date(),
+      },
+    };
+
+    await usersCollection.updateOne({ email: safeEmail }, updateDoc, {
+      upsert: true,
     });
 
-    // ✅ GET USER PROFILE (secured)
-    app.get("/users/profile/:email", verifyToken, async (req, res) => {
-      try {
-        const requestedEmail = req.params.email;
-        const tokenEmail = req.decoded.email;
+    const user = await usersCollection.findOne({ email: safeEmail });
 
-        const requester = await usersCollection.findOne({ email: tokenEmail });
-        if (!requester) {
-          return res
-            .status(404)
-            .send({ success: false, message: "Requester not found" });
-        }
-
-        if (requester.email !== requestedEmail && requester.role !== "admin") {
-          return res.status(403).send({
-            success: false,
-            message: "Forbidden: Cannot access other user's profile",
-          });
-        }
-
-        const user = await usersCollection.findOne(
-          { email: requestedEmail },
-          {
-            projection: {
-              _id: 1,
-              email: 1,
-              name: 1,
-              photoURL: 1,
-              phone: 1,
-              role: 1,
-              isPremium: 1,
-              isBlocked: 1,
-              issueCount: 1,
-              createdAt: 1,
-              updatedAt: 1,
-            },
-          }
-        );
-
-        if (!user) {
-          return res
-            .status(404)
-            .send({ success: false, message: "User not found" });
-        }
-
-        res.send({ success: true, user });
-      } catch (error) {
-        console.error("Error fetching profile:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to load profile",
-          error: error.message,
-        });
-      }
+    res.status(existingUser ? 200 : 201).send({
+      success: true,
+      message: existingUser
+        ? "User updated successfully"
+        : "User created successfully",
+      user,
     });
+  } catch (error) {
+    console.error("Error creating/updating user:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to create/update user",
+      error: error.message,
+    });
+  }
+});
+
+
+// ✅ GET USER PROFILE (secured) + safety auto-create requester
+app.get("/users/profile/:email", verifyToken, async (req, res) => {
+  try {
+    const requestedEmail = (req.params.email || "").trim().toLowerCase();
+    const tokenEmail = (req.decoded?.email || "").trim().toLowerCase();
+
+    if (!tokenEmail) {
+      return res
+        .status(401)
+        .send({ success: false, message: "Unauthorized (no email in token)" });
+    }
+
+    // ✅ Ensure requester exists (safety net)
+    let requester = await usersCollection.findOne({ email: tokenEmail });
+
+    if (!requester) {
+      await usersCollection.updateOne(
+        { email: tokenEmail },
+        {
+          $set: { updatedAt: new Date() },
+          $setOnInsert: {
+            email: tokenEmail,
+            name: tokenEmail.split("@")[0],
+            photoURL: "",
+            role: "citizen",
+            isPremium: false,
+            isBlocked: false,
+            issueCount: 0,
+            createdAt: new Date(),
+          },
+        },
+        { upsert: true }
+      );
+
+      requester = await usersCollection.findOne({ email: tokenEmail });
+    }
+
+    // ✅ Authorization: self or admin
+    if (requester.email !== requestedEmail && requester.role !== "admin") {
+      return res.status(403).send({
+        success: false,
+        message: "Forbidden: Cannot access other user's profile",
+      });
+    }
+
+    const user = await usersCollection.findOne(
+      { email: requestedEmail },
+      {
+        projection: {
+          _id: 1,
+          email: 1,
+          name: 1,
+          photoURL: 1,
+          phone: 1,
+          role: 1,
+          isPremium: 1,
+          isBlocked: 1,
+          issueCount: 1,
+          createdAt: 1,
+          updatedAt: 1,
+        },
+      }
+    );
+
+    if (!user) {
+      return res
+        .status(404)
+        .send({ success: false, message: "User not found" });
+    }
+
+    res.send({ success: true, user });
+  } catch (error) {
+    console.error("Error fetching profile:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to load profile",
+      error: error.message,
+    });
+  }
+});
+
+
 
     // ✅ UPDATE MY PROFILE (for admin/staff/citizen)
     app.patch("/users/profile", verifyToken, async (req, res) => {
@@ -966,44 +1018,205 @@ app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
   }
 });
 
+// issue delete
+
+app.delete("/issues/:id", verifyToken, async (req, res) => {
+  try {
+    const id = req.params.id;
+    const email = (req.decoded?.email || "").trim().toLowerCase();
+
+    if (!ObjectId.isValid(id)) {
+      return res.status(400).send({ success: false, message: "Invalid issue id" });
+    }
+
+    // 1) Find issue
+    const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+
+    if (!issue) {
+      return res.status(404).send({ success: false, message: "Issue not found" });
+    }
+
+    // 2) Check ownership (supports all shapes)
+    const ownerEmail =
+      (issue?.reportedBy?.email || issue?.reportedBy || issue?.userEmail || issue?.reportedByEmail || "")
+        .toString()
+        .trim()
+        .toLowerCase();
+
+    // 3) If you have usersCollection, allow admin too (optional but useful)
+    let isAdmin = false;
+    if (typeof usersCollection !== "undefined") {
+      const requester = await usersCollection.findOne({ email });
+      isAdmin = requester?.role === "admin";
+    }
+
+    if (!isAdmin && ownerEmail !== email) {
+      return res.status(403).send({
+        success: false,
+        message: "Forbidden: you can only delete your own issues",
+      });
+    }
+
+    // 4) Optional rule: only pending can be deleted (matches your UI)
+    const status = (issue.status || "").toLowerCase();
+    if (!isAdmin && status !== "pending") {
+      return res.status(403).send({
+        success: false,
+        message: "Only pending issues can be deleted",
+      });
+    }
+
+    // 5) Delete
+    const result = await issuesCollection.deleteOne({ _id: new ObjectId(id) });
+
+    if (result.deletedCount === 0) {
+      return res.status(500).send({ success: false, message: "Delete failed" });
+    }
+
+    res.send({ success: true, message: "Issue deleted successfully" });
+  } catch (err) {
+    console.error("Error deleting issue:", err);
+    res.status(500).send({ success: false, message: "Failed to delete issue" });
+  }
+});
+
+
+
+ /* =========================
+       ✅ Payment ENDPOINTS
+       ========================= */
+
+       // payments collection
+const paymentsCollection = db.collection("payments");
+
+// ✅ USER: pay 1000tk & become premium
+app.post("/payments/subscribe", verifyToken, async (req, res) => {
+  try {
+    const email = req.decoded.email;
+    const user = await usersCollection.findOne({ email });
+
+    if (!user) return res.status(404).send({ success: false, message: "User not found" });
+    if (user.isBlocked) return res.status(403).send({ success: false, message: "Blocked users cannot subscribe" });
+    if (user.isPremium) return res.status(400).send({ success: false, message: "Already premium" });
+
+    // For assignment: accept transactionId from client or generate one
+    const { transactionId, method } = req.body || {};
+    const trx = transactionId || `TRX-${Date.now()}`;
+
+    const paymentDoc = {
+      email,
+      amount: 1000,
+      method: method || "assignment",
+      transactionId: trx,
+      createdAt: new Date(),
+      monthKey: new Date().toISOString().slice(0, 7), // "YYYY-MM"
+    };
+
+    await paymentsCollection.insertOne(paymentDoc);
+
+    await usersCollection.updateOne(
+      { email },
+      { $set: { isPremium: true, updatedAt: new Date() } }
+    );
+
+    res.status(201).send({
+      success: true,
+      message: "Payment successful. You are now premium.",
+      payment: paymentDoc,
+    });
+  } catch (error) {
+    console.error("Error subscribing:", error);
+    res.status(500).send({ success: false, message: "Subscription failed", error: error.message });
+  }
+});
+
+// ✅ USER: see my payments
+app.get("/payments/my", verifyToken, async (req, res) => {
+  try {
+    const email = req.decoded.email;
+    const payments = await paymentsCollection
+      .find({ email })
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send({ success: true, payments });
+  } catch (error) {
+    res.status(500).send({ success: false, message: "Failed to load payments" });
+  }
+});
+
+// ✅ ADMIN: see all payments (filters)
+app.get("/admin/payments", verifyToken, requireAdmin, async (req, res) => {
+  try {
+    const { email, monthKey } = req.query;
+
+    const filter = {};
+    if (email) filter.email = email;
+    if (monthKey) filter.monthKey = monthKey;
+
+    const payments = await paymentsCollection
+      .find(filter)
+      .sort({ createdAt: -1 })
+      .toArray();
+
+    res.send({ success: true, payments });
+  } catch (error) {
+    res.status(500).send({ success: false, message: "Failed to load payments", error: error.message });
+  }
+});
+
 
     /* =========================
        ✅ STAFF ENDPOINTS
        ========================= */
 
-    app.get("/staff/issues", verifyToken, requireStaff, async (req, res) => {
-      try {
-        const email = req.decoded.email;
-        const page = parseInt(req.query.page) || 1;
-        const limit = parseInt(req.query.limit) || 10;
-        const skip = (page - 1) * limit;
 
-        const filter = { "assignedTo.email": email };
+app.get("/staff/issues", verifyToken, requireStaff, async (req, res) => {
+  try {
+    const email = req.decoded.email;
 
-        const status = (req.query.status || "all").trim();
-        if (status !== "all") filter.status = status;
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const skip = (page - 1) * limit;
 
-        const total = await issuesCollection.countDocuments(filter);
+    const filter = { "assignedTo.email": email };
 
-        const issues = await issuesCollection
-          .find(filter)
-          .sort({ priority: -1, createdAt: -1 })
-          .skip(skip)
-          .limit(limit)
-          .toArray();
+    const status = (req.query.status || "all").trim().toLowerCase();
+    if (status !== "all") filter.status = status;
 
-        const totalPages = Math.ceil(total / limit);
+    const priority = (req.query.priority || "all").trim().toLowerCase();
+    if (priority !== "all") filter.priority = priority;
 
-        res.send({ success: true, issues, total, page, limit, totalPages });
-      } catch (error) {
-        console.error("Error fetching staff issues:", error);
-        res.status(500).send({
-          success: false,
-          message: "Failed to load assigned issues",
-          error: error.message,
-        });
-      }
+    const pipeline = [
+      { $match: filter },
+      {
+        $addFields: {
+          priorityRank: {
+            $cond: [{ $eq: ["$priority", "high"] }, 1, 0],
+          },
+        },
+      },
+      { $sort: { priorityRank: -1, createdAt: -1 } },
+      { $skip: skip },
+      { $limit: limit },
+      { $project: { priorityRank: 0 } },
+    ];
+
+    const issues = await issuesCollection.aggregate(pipeline).toArray();
+    const total = await issuesCollection.countDocuments(filter);
+    const totalPages = Math.ceil(total / limit);
+
+    res.send({ success: true, issues, total, page, limit, totalPages });
+  } catch (error) {
+    console.error("Error fetching staff issues:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to load assigned issues",
+      error: error.message,
     });
+  }
+});
+
 
     app.patch("/staff/issues/:id/status", verifyToken, requireStaff, async (req, res) => {
       try {
