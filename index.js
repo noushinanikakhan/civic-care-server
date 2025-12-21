@@ -836,8 +836,14 @@ app.get("/users/profile/:email", verifyToken, async (req, res) => {
         const totalUsers = await usersCollection.countDocuments();
         const totalIssues = await issuesCollection.countDocuments();
         const pendingIssues = await issuesCollection.countDocuments({ status: "pending" });
-        const resolvedIssues = await issuesCollection.countDocuments({ status: "resolved" });
-        const inProgressIssues = await issuesCollection.countDocuments({ status: "in-progress" });
+        const resolvedIssues = await issuesCollection.countDocuments({
+  status: { $in: ["resolved", "closed"] }
+});
+
+const inProgressIssues = await issuesCollection.countDocuments({
+  status: { $in: ["in-progress", "working"] }
+});
+
         const rejectedIssues = await issuesCollection.countDocuments({ status: "rejected" });
 
         const recentIssues = await issuesCollection.find().sort({ createdAt: -1 }).limit(6).toArray();
@@ -1181,8 +1187,16 @@ app.get("/staff/issues", verifyToken, requireStaff, async (req, res) => {
 
     const filter = { "assignedTo.email": email };
 
-    const status = (req.query.status || "all").trim().toLowerCase();
-    if (status !== "all") filter.status = status;
+const status = (req.query.status || "all").trim().toLowerCase();
+if (status !== "all") {
+  const normalized =
+    status === "working" ? "in-progress" :
+    status === "closed" ? "resolved" :
+    status;
+
+  filter.status = normalized;
+}
+
 
     const priority = (req.query.priority || "all").trim().toLowerCase();
     if (priority !== "all") filter.priority = priority;
@@ -1236,23 +1250,47 @@ app.get("/staff/issues", verifyToken, requireStaff, async (req, res) => {
           return res.status(404).send({ success: false, message: "Issue not found or not assigned to you" });
         }
 
-        const validStatuses = ["pending", "in-progress", "working", "resolved", "closed"];
-        if (!validStatuses.includes(status)) {
-          return res.status(400).send({ success: false, message: "Invalid status" });
-        }
+const rawStatus = String(status).trim().toLowerCase();
 
-        const timelineItem = {
-          status,
-          message: `Status changed to ${status}`,
-          updatedBy: "Staff",
-          date: new Date(),
-        };
+// staff can submit these
+const allowedStaffStatuses = ["in-progress", "working", "resolved", "closed"];
+if (!allowedStaffStatuses.includes(rawStatus)) {
+  return res.status(400).send({ success: false, message: "Invalid status" });
+}
 
-        const result = await issuesCollection.findOneAndUpdate(
-          { _id: new ObjectId(id) },
-          { $set: { status, updatedAt: new Date() }, $push: { timeline: timelineItem } },
-          { returnDocument: "after" }
-        );
+// ✅ normalize to keep DB consistent with your dashboards
+const normalizedStatus =
+  rawStatus === "working" ? "in-progress" :
+  rawStatus === "closed" ? "resolved" :
+  rawStatus;
+
+// ✅ timeline keeps the audit meaning (closed/working) without breaking UI
+const timelineItem = {
+  status: normalizedStatus,                       // keep canonical for timeline filtering
+  message:
+    rawStatus === "working"
+      ? "Work started on the issue"
+      : rawStatus === "closed"
+      ? "Issue closed by staff"
+      : `Status changed to ${normalizedStatus}`,
+  updatedBy: "Staff",
+  date: new Date(),
+};
+
+const result = await issuesCollection.findOneAndUpdate(
+  { _id: new ObjectId(id) },
+  { $set: { status: normalizedStatus, updatedAt: new Date() }, $push: { timeline: timelineItem } },
+  { returnDocument: "after" }
+);
+
+res.send({
+  success: true,
+  message: "Status updated",
+  issue: result.value,
+  normalizedStatus,         // helpful for frontend
+  receivedStatus: rawStatus // helpful for frontend
+});
+
 
         res.send({ success: true, message: "Status updated", issue: result.value });
       } catch (error) {
