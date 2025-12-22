@@ -4,18 +4,32 @@ require("dotenv").config();
 
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
-/* =========================
-   ✅ Firebase Admin (server only)
-   ========================= */
+
+    // Firebase Admin (server only)
+  
 const admin = require("firebase-admin");
 
+if (!admin.apps.length) {
+  const raw = process.env.FIREBASE_SERVICE_ACCOUNT;
+  if (!raw) {
+    throw new Error("FIREBASE_SERVICE_ACCOUNT is missing");
+  }
 
-const decoded = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, 'base64').toString('utf8')
-const serviceAccount = JSON.parse(decoded);
+  let serviceAccount;
+  try {
+    serviceAccount = JSON.parse(
+      Buffer.from(raw, "base64").toString("utf8")
+    );
+  } catch (e) {
+    throw new Error("Invalid FIREBASE_SERVICE_ACCOUNT base64");
+  }
 
-admin.initializeApp({
-  credential: admin.credential.cert(serviceAccount),
-});
+  admin.initializeApp({
+    credential: admin.credential.cert(serviceAccount),
+  });
+}
+
+
 
 const app = express();
 const port = process.env.PORT || 3000;
@@ -26,6 +40,11 @@ const port = process.env.PORT || 3000;
 app.use(cors());
 app.use(express.json({ limit: "10mb" }));
 app.use(express.urlencoded({ extended: true, limit: "10mb" }));
+
+
+app.get("/", (req, res) => {
+  res.send("✅ CivicCare Server is running");
+});
 
 /* =========================
    ✅ VERIFY TOKEN (Firebase ID Token)
@@ -70,7 +89,7 @@ const client = new MongoClient(uri, {
 
 async function run() {
   try {
-    await client.connect();
+    // await client.connect();
     console.log("✅ Connected to MongoDB!");
 
     const db = client.db("civic_care_db");
@@ -78,24 +97,24 @@ async function run() {
     const issuesCollection = db.collection("issues");
 
     // ✅ indexes (safe + helpful)
-    await usersCollection.createIndex({ email: 1 }, { unique: true });
+    // await usersCollection.createIndex({ email: 1 }, { unique: true });
 
-    // these help sorting/filtering
-    await issuesCollection.createIndex({ createdAt: -1 });
-    await issuesCollection.createIndex({ category: 1 });
-    await issuesCollection.createIndex({ status: 1 });
-    await issuesCollection.createIndex({ priority: 1, createdAt: -1 });
+    // // these help sorting/filtering
+    // await issuesCollection.createIndex({ createdAt: -1 });
+    // await issuesCollection.createIndex({ category: 1 });
+    // await issuesCollection.createIndex({ status: 1 });
+    // await issuesCollection.createIndex({ priority: 1, createdAt: -1 });
 
-    // helps "my issues" fast
-    await issuesCollection.createIndex({ reportedBy: 1, createdAt: -1 });
-    await issuesCollection.createIndex({ "reportedBy.email": 1, createdAt: -1 });
-    await issuesCollection.createIndex({ userEmail: 1, createdAt: -1 });
+    // // helps "my issues" fast
+    // await issuesCollection.createIndex({ reportedBy: 1, createdAt: -1 });
+    // await issuesCollection.createIndex({ "reportedBy.email": 1, createdAt: -1 });
+    // await issuesCollection.createIndex({ userEmail: 1, createdAt: -1 });
 
-    console.log("✅ Database indexes created");
+    // console.log("✅ Database indexes created");
 
-    /* =========================
-       ✅ ROLE HELPERS
-       ========================= */
+    
+      //   ROLE HELPERS
+    
     const requireAdmin = async (req, res, next) => {
       const tokenEmail = req.decoded?.email;
       console.log("🔍 Admin check for:", tokenEmail);
@@ -150,16 +169,9 @@ async function run() {
     //   }
     // });
 
-    /* =========================
-       ✅ USERS
-       ========================= */
+    
 
-    // ✅ CREATE USER
-/* =========================
-   ✅ USERS
-   ========================= */
-
-// ✅ CREATE/UPSERT USER (registration + google + login safety)
+//  CREATE/UPSERT USER (registration + google + login safety)
 app.post("/users", async (req, res) => {
   try {
     const { email, name, photoURL } = req.body || {};
@@ -185,7 +197,7 @@ app.post("/users", async (req, res) => {
     const existingUser = await usersCollection.findOne({ email: safeEmail });
 
     /**
-     * ✅ ROOT CAUSE FIX:
+     * ROOT CAUSE FIX:
      * Do NOT set the same field in $set and $setOnInsert.
      * Put name/photoURL only in $set (works for insert + update).
      */
@@ -229,7 +241,7 @@ app.post("/users", async (req, res) => {
 });
 
 
-// ✅ GET USER PROFILE (secured) + safety auto-create requester
+//  GET USER PROFILE (secured) + safety auto-create requester
 app.get("/users/profile/:email", verifyToken, async (req, res) => {
   try {
     const requestedEmail = (req.params.email || "").trim().toLowerCase();
@@ -312,7 +324,7 @@ app.get("/users/profile/:email", verifyToken, async (req, res) => {
 
 
 
-    // ✅ UPDATE MY PROFILE (for admin/staff/citizen)
+    //  UPDATE MY PROFILE (for admin/staff/citizen)
     app.patch("/users/profile", verifyToken, async (req, res) => {
       try {
         const email = req.decoded.email;
@@ -362,7 +374,7 @@ res.send({
       }
     });
 
-    // ✅ GET ALL USERS (admin only)
+    // GET ALL USERS (admin only)
     app.get("/users", verifyToken, requireAdmin, async (req, res) => {
       try {
         const users = await usersCollection
@@ -380,7 +392,7 @@ res.send({
       }
     });
 
-    // ✅ TOGGLE USER BLOCK (admin only)
+    //  TOGGLE USER BLOCK (admin only)
     app.patch(
       "/users/:email/toggle-block",
       verifyToken,
@@ -844,19 +856,29 @@ res.send({
         const totalUsers = await usersCollection.countDocuments();
         const totalIssues = await issuesCollection.countDocuments();
         const pendingIssues = await issuesCollection.countDocuments({ status: "pending" });
-        const resolvedIssues = await issuesCollection.countDocuments({
-  status: { $in: ["resolved", "closed"] }
-});
+//         const resolvedIssues = await issuesCollection.countDocuments({
+//   status: { $in: ["resolved", "closed"] }
+// });
 
-const inProgressIssues = await issuesCollection.countDocuments({
-  status: { $in: ["in-progress", "working"] }
-});
+// const inProgressIssues = await issuesCollection.countDocuments({
+//   status: { $in: ["in-progress", "working"] }
+// });
 
         const rejectedIssues = await issuesCollection.countDocuments({ status: "rejected" });
 
         const recentIssues = await issuesCollection.find().sort({ createdAt: -1 }).limit(6).toArray();
         const recentUsers = await usersCollection.find().sort({ createdAt: -1 }).limit(6).toArray();
 
+
+      const resolvedIssues = await issuesCollection.countDocuments({
+      status: { $regex: /resolved|closed/i }  // Match both "resolved" and "closed"
+    });
+
+    const inProgressIssues = await issuesCollection.countDocuments({
+      status: { $regex: /in-progress|working/i }  // Match both "in-progress" and "working"
+    })
+    
+    
         res.send({
           success: true,
           stats: {
@@ -1310,6 +1332,28 @@ res.send({
       }
     });
 
+    // ✅ PUBLIC: Get resolved issues for homepage
+app.get("/issues/resolved", async (req, res) => {
+  try {
+    const issues = await issuesCollection
+      .find({
+        status: { $regex: /resolved|closed/i }
+      })
+      .sort({ updatedAt: -1 })
+      .limit(6)
+      .toArray();
+
+    res.send({ success: true, issues });
+  } catch (error) {
+    console.error("Error fetching resolved issues:", error);
+    res.status(500).send({
+      success: false,
+      message: "Failed to load resolved issues",
+      error: error.message
+    });
+  }
+});
+
     /* =========================
        ✅ SETUP ADMIN (one-time)
        ========================= */
@@ -1516,7 +1560,7 @@ app.delete("/admin/staff/:email", verifyToken, requireAdmin, async (req, res) =>
     console.log("✅ All routes loaded successfully");
   } catch (error) {
     console.error("❌ MongoDB connection error:", error);
-    process.exit(1);
+    // process.exit(1);
   }
 }
 
