@@ -1522,8 +1522,3 @@ run().catch(console.dir);
 module.exports = app;
 
 
-// app.listen(port, () => {
-//   console.log(`🚀 Server running on port ${port}`);
-//   console.log(`🌐 Health check: http://localhost:${port}/health`);
-//   console.log(`📊 Admin setup endpoint: POST http://localhost:${port}/setup-admin`);
-// });
