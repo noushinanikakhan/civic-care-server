@@ -8,7 +8,10 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
    ✅ Firebase Admin (server only)
    ========================= */
 const admin = require("firebase-admin");
-const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
+
+
+const decoded = Buffer.from(process.env.FIREBASE_SERVICE_ACCOUNT, 'base64').toString('utf8')
+const serviceAccount = JSON.parse(decoded);
 
 admin.initializeApp({
   credential: admin.credential.cert(serviceAccount),
@@ -129,23 +132,23 @@ async function run() {
     /* =========================
        ✅ ROOT + HEALTH
        ========================= */
-    app.get("/", (req, res) => res.send("🚀 CivicCare Server is running"));
+    // app.get("/", (req, res) => res.send("🚀 CivicCare Server is running"));
 
-    app.get("/health", async (req, res) => {
-      try {
-        await client.db("admin").command({ ping: 1 });
-        const usersCount = await usersCollection.countDocuments();
-        const issuesCount = await issuesCollection.countDocuments();
-        res.send({
-          status: "healthy",
-          database: "connected",
-          collections: { users: usersCount, issues: issuesCount },
-          timestamp: new Date().toISOString(),
-        });
-      } catch (error) {
-        res.status(500).send({ status: "unhealthy", error: error.message });
-      }
-    });
+    // app.get("/health", async (req, res) => {
+    //   try {
+    //     // await client.db("admin").command({ ping: 1 });
+    //     const usersCount = await usersCollection.countDocuments();
+    //     const issuesCount = await issuesCollection.countDocuments();
+    //     res.send({
+    //       status: "healthy",
+    //       database: "connected",
+    //       collections: { users: usersCount, issues: issuesCount },
+    //       timestamp: new Date().toISOString(),
+    //     });
+    //   } catch (error) {
+    //     res.status(500).send({ status: "unhealthy", error: error.message });
+    //   }
+    // });
 
     /* =========================
        ✅ USERS
@@ -975,59 +978,59 @@ app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
 
 // UPVOTE ISSUE-details page (token required)
 
-app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const email = req.decoded.email;
+// app.patch("/issues/:id/upvote", verifyToken, async (req, res) => {
+//   try {
+//     const { id } = req.params;
+//     const email = req.decoded.email;
 
-    if (!ObjectId.isValid(id)) {
-      return res.status(400).send({ success: false, message: "Invalid issue ID" });
-    }
+//     if (!ObjectId.isValid(id)) {
+//       return res.status(400).send({ success: false, message: "Invalid issue ID" });
+//     }
 
-    const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
-    if (!issue) {
-      return res.status(404).send({ success: false, message: "Issue not found" });
-    }
+//     const issue = await issuesCollection.findOne({ _id: new ObjectId(id) });
+//     if (!issue) {
+//       return res.status(404).send({ success: false, message: "Issue not found" });
+//     }
 
-    // ✅ owner check (STRING-based, consistent)
-    const ownerEmail = issue.reportedBy;
-    if (ownerEmail === email) {
-      return res.status(400).send({
-        success: false,
-        message: "You cannot upvote your own issue",
-      });
-    }
+//     // ✅ owner check (STRING-based, consistent)
+//     const ownerEmail = issue.reportedBy;
+//     if (ownerEmail === email) {
+//       return res.status(400).send({
+//         success: false,
+//         message: "You cannot upvote your own issue",
+//       });
+//     }
 
-    // ✅ prevent double upvote
-    if (issue.upvotedBy?.includes(email)) {
-      return res.status(400).send({
-        success: false,
-        message: "You have already upvoted this issue",
-      });
-    }
+//     // ✅ prevent double upvote
+//     if (issue.upvotedBy?.includes(email)) {
+//       return res.status(400).send({
+//         success: false,
+//         message: "You have already upvoted this issue",
+//       });
+//     }
 
-    // ✅ atomic update
-    await issuesCollection.updateOne(
-      { _id: new ObjectId(id) },
-      {
-        $inc: { upvoteCount: 1 },
-        $push: { upvotedBy: email },
-        $set: { updatedAt: new Date() },
-      }
-    );
+//     // ✅ atomic update
+//     await issuesCollection.updateOne(
+//       { _id: new ObjectId(id) },
+//       {
+//         $inc: { upvoteCount: 1 },
+//         $push: { upvotedBy: email },
+//         $set: { updatedAt: new Date() },
+//       }
+//     );
 
-    return res.send({
-      success: true,
-      message: "Issue upvoted",
-    });
-  } catch (error) {
-    console.error("❌ Error upvoting issue:", error);
-    res.status(500).send({
-      success: false,
-      message: "Failed to upvote issue",
-    });
-  }
-});
+//     return res.send({
+//       success: true,
+//       message: "Issue upvoted",
+//     });
+//   } catch (error) {
+//     console.error("❌ Error upvoting issue:", error);
+//     res.status(500).send({
+//       success: false,
+//       message: "Failed to upvote issue",
+//     });
+//   }
+// });
 
 // issue delete
 
@@ -1296,7 +1299,7 @@ res.send({
 });
 
 
-        res.send({ success: true, message: "Status updated", issue: result.value });
+        // res.send({ success: true, message: "Status updated", issue: result.value });
       } catch (error) {
         console.error("Error updating status:", error);
         res.status(500).send({
