@@ -9,8 +9,8 @@ const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 app.use(
   cors({
     origin: [
-      "http://localhost:5173",
-      "http://localhost:3000",
+      // "http://localhost:5173",
+      // "http://localhost:3000",
       "https://civic-care-ed056.web.app",
     ],
     credentials: true,
