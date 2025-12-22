@@ -280,7 +280,7 @@ if (!requester) {
   );
 
   requester = await usersCollection.findOne({ email: tokenEmail });
-}
+
 
 
       requester = await usersCollection.findOne({ email: tokenEmail });
