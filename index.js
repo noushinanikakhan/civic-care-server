@@ -172,69 +172,73 @@ async function run() {
     
 
 //  CREATE/UPSERT USER (registration + google + login safety)
+// ✅ POST /users (create if not exists; update name/photo if provided)
 app.post("/users", async (req, res) => {
   try {
-    const { email, name, photoURL } = req.body || {};
+    const { email, name, photoURL } = req.body;
 
-    const safeEmail = (email || "").trim().toLowerCase();
-    const safeName = (name || "").trim();
-    const safePhotoURL = (photoURL || "").trim();
-
-    if (!safeEmail) {
-      return res
-        .status(400)
-        .send({ success: false, message: "Email is required" });
+    if (!email) {
+      return res.status(400).send({ success: false, message: "Email is required" });
     }
 
-    // ✅ You said you're using Unsplash/public links, so require it
-    // if (!safePhotoURL) {
-    //   return res.status(400).send({
-    //     success: false,
-    //     message: "photoURL is required (paste an Unsplash/public image URL)",
-    //   });
-    // }
+    const existingUser = await usersCollection.findOne({ email });
 
-    const existingUser = await usersCollection.findOne({ email: safeEmail });
-
-    /**
-     * ROOT CAUSE FIX:
-     * Do NOT set the same field in $set and $setOnInsert.
-     * Put name/photoURL only in $set (works for insert + update).
-     */
-    const updateDoc = {
-      $set: {
-        email: safeEmail,
-        name: safeName || safeEmail.split("@")[0],
-        photoURL: safePhotoURL,
+    // ✅ CHANGED: if user exists, update ONLY if values provided (don’t overwrite photoURL with "")
+    if (existingUser) {
+      const $set = {
         updatedAt: new Date(),
-      },
-      $setOnInsert: {
-        role: "citizen",
-        isPremium: false,
-        isBlocked: false,
-        issueCount: 0,
-        createdAt: new Date(),
-      },
+        ...(name ? { name } : {}),
+        ...(photoURL ? { photoURL } : {}), // ✅ PASTE HERE (this is the right place)
+      };
+
+      // if nothing to update, just return existing
+      if (Object.keys($set).length === 1) {
+        return res.send({
+          success: true,
+          message: "User already exists",
+          user: existingUser,
+        });
+      }
+
+      const updated = await usersCollection.findOneAndUpdate(
+        { email },
+        { $set },
+        { returnDocument: "after" }
+      );
+
+      return res.send({
+        success: true,
+        message: "User updated",
+        user: updated.value,
+      });
+    }
+
+    // ✅ create new user
+    const userDoc = {
+      email,
+      name: name || email.split("@")[0],
+      photoURL: photoURL || "",
+      role: "citizen",
+      isPremium: false,
+      isBlocked: false,
+      issueCount: 0,
+      createdAt: new Date(),
+      updatedAt: new Date(),
     };
 
-    await usersCollection.updateOne({ email: safeEmail }, updateDoc, {
-      upsert: true,
-    });
+    const result = await usersCollection.insertOne(userDoc);
 
-    const user = await usersCollection.findOne({ email: safeEmail });
-
-    res.status(existingUser ? 200 : 201).send({
+    res.status(201).send({
       success: true,
-      message: existingUser
-        ? "User updated successfully"
-        : "User created successfully",
-      user,
+      message: "User created successfully",
+      userId: result.insertedId,
+      user: userDoc,
     });
   } catch (error) {
-    console.error("Error creating/updating user:", error);
+    console.error("Error creating user:", error);
     res.status(500).send({
       success: false,
-      message: "Failed to create/update user",
+      message: "Failed to create user",
       error: error.message,
     });
   }
@@ -253,27 +257,31 @@ app.get("/users/profile/:email", verifyToken, async (req, res) => {
         .send({ success: false, message: "Unauthorized (no email in token)" });
     }
 
-    // ✅ Ensure requester exists (safety net)
-    let requester = await usersCollection.findOne({ email: tokenEmail });
+// ✅ CHANGED: auto-create requester if missing (prevents "Requester not found")
+let requester = await usersCollection.findOne({ email: tokenEmail });
 
-    if (!requester) {
-      await usersCollection.updateOne(
-        { email: tokenEmail },
-        {
-          $set: { updatedAt: new Date() },
-          $setOnInsert: {
-            email: tokenEmail,
-            name: tokenEmail.split("@")[0],
-            photoURL: "",
-            role: "citizen",
-            isPremium: false,
-            isBlocked: false,
-            issueCount: 0,
-            createdAt: new Date(),
-          },
-        },
-        { upsert: true }
-      );
+if (!requester) {
+  const fallbackDoc = {
+    email: tokenEmail,
+    name: tokenEmail.split("@")[0],
+    photoURL: "",
+    role: "citizen",
+    isPremium: false,
+    isBlocked: false,
+    issueCount: 0,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  await usersCollection.updateOne(
+    { email: tokenEmail },
+    { $setOnInsert: fallbackDoc },
+    { upsert: true }
+  );
+
+  requester = await usersCollection.findOne({ email: tokenEmail });
+}
+
 
       requester = await usersCollection.findOne({ email: tokenEmail });
     }
