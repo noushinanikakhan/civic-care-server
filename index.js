@@ -5,6 +5,25 @@ require("dotenv").config();
 const { MongoClient, ServerApiVersion, ObjectId } = require("mongodb");
 
 
+// ✅ CORS must come BEFORE routes
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5173",
+      "http://localhost:3000",
+      "https://civic-care-ed056.web.app",
+    ],
+    credentials: true,
+  })
+);
+
+// ✅ Handle preflight explicitly (VERY IMPORTANT for Vercel)
+app.options("*", cors());
+
+// then other middleware
+app.use(express.json())
+
+
     // Firebase Admin (server only)
   
 const admin = require("firebase-admin");
